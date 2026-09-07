@@ -3,8 +3,12 @@ import { GROQ_MODEL } from "@/lib/ai/provider";
 /**
  * Dev helper: lists the model IDs your Groq key can actually access.
  * GET http://localhost:3000/api/models -> { model: string, models: string[] }
+ * Phase 4: local-only — returns 404 on the public deployment.
  */
-export async function GET() {
+export async function GET(req: Request) {
+  if (process.env.AGENT_MODE === "public") {
+    return Response.json({ error: "Not found." }, { status: 404 });
+  }
   if (!process.env.GROQ_API_KEY) {
     return Response.json(
       { error: "GROQ_API_KEY is not set. Add it to .env.local." },

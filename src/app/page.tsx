@@ -1,9 +1,103 @@
 "use client";
 
 import { useChat } from "@ai-sdk/react";
-import { lastAssistantMessageIsCompleteWithApprovalResponses } from "ai";
+import {
+  DefaultChatTransport,
+  lastAssistantMessageIsCompleteWithApprovalResponses,
+} from "ai";
 import { diffLines } from "diff";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+
+/** ── Phase 4: the local bridge ─────────────────────────────────────────── */
+
+type BridgeConfig = { url: string; key: string };
+const BRIDGE_STORAGE_KEY = "sinister-bridge";
+
+function loadBridge(): BridgeConfig | null {
+  if (typeof window === "undefined") return null;
+  try {
+    const raw = localStorage.getItem(BRIDGE_STORAGE_KEY);
+    return raw ? (JSON.parse(raw) as BridgeConfig) : null;
+  } catch {
+    return null;
+  }
+}
+
+function BridgeModal({
+  current,
+  onSave,
+  onClose,
+}: {
+  current: BridgeConfig | null;
+  onSave: (config: BridgeConfig | null) => void;
+  onClose: () => void;
+}) {
+  const [url, setUrl] = useState(current?.url ?? "");
+  const [key, setKey] = useState(current?.key ?? "");
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm"
+      onClick={onClose}
+    >
+      <div
+        className="rave-border rave-glow w-[min(90vw,28rem)] rounded-2xl p-[1.5px]"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="rave-panel rounded-[calc(1rem-1px)] p-5">
+          <h2 className="rave-text font-mono text-sm font-bold tracking-widest">
+            ⚡ LOCAL BRIDGE
+          </h2>
+          <p className="mt-2 font-mono text-[11px] text-zinc-400">
+            Route chat to your own machine through its Cloudflare Tunnel.
+            Requests will carry your secret key — only enable this from a
+            device you trust.
+          </p>
+          <label className="mt-4 block font-mono text-[10px] uppercase tracking-widest text-cyan-300/80">
+            Tunnel URL
+          </label>
+          <input
+            className="mt-1 w-full rounded-lg border border-fuchsia-500/40 bg-black/80 px-3 py-2 font-mono text-xs text-lime-200 outline-none focus:border-cyan-300/70"
+            placeholder="https://your-tunnel.trycloudflare.com"
+            value={url}
+            onChange={(e) => setUrl(e.target.value)}
+          />
+          <label className="mt-3 block font-mono text-[10px] uppercase tracking-widest text-cyan-300/80">
+            Agent key
+          </label>
+          <input
+            className="mt-1 w-full rounded-lg border border-fuchsia-500/40 bg-black/80 px-3 py-2 font-mono text-xs text-lime-200 outline-none focus:border-cyan-300/70"
+            placeholder="AGENT_KEY from local .env.local"
+            type="password"
+            value={key}
+            onChange={(e) => setKey(e.target.value)}
+          />
+          <div className="mt-4 flex gap-2">
+            <button
+              className="rave-btn flex-1 rounded-lg px-4 py-2 font-mono text-xs font-bold uppercase tracking-widest transition-transform"
+              onClick={() => {
+                if (!url.trim()) return;
+                onSave({ url: url.trim(), key: key.trim() });
+                onClose();
+              }}
+            >
+              Connect
+            </button>
+            <button
+              className="rave-btn rave-btn-deny rounded-lg px-4 py-2 font-mono text-xs font-bold uppercase tracking-widest text-white transition-transform"
+              onClick={() => {
+                onSave(null);
+                onClose();
+              }}
+            >
+              Disconnect
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
 
 /** Loose shape of a tool part in the UI message stream. */
 type LooseToolPart = {
@@ -230,6 +324,48 @@ function ToolPartView({
 
 export default function Chat() {
   const [input, setInput] = useState("");
+  const [bridge, setBridge] = useState<BridgeConfig | null>(null);
+  const [bridgeOpen, setBridgeOpen] = useState(false);
+
+  // Load saved bridge config after mount (avoids SSR/hydration issues).
+  useEffect(() => {
+    setBridge(loadBridge());
+  }, []);
+
+  // Hidden toggle: Ctrl+Shift+E (or Cmd+Shift+E) opens the bridge dialog.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (
+        (e.ctrlKey || e.metaKey) &&
+        e.shiftKey &&
+        e.key.toLowerCase() === "e"
+      ) {
+        e.preventDefault();
+        setBridgeOpen((open) => !open);
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
+
+  const saveBridge = (config: BridgeConfig | null) => {
+    setBridge(config);
+    if (config) {
+      localStorage.setItem(BRIDGE_STORAGE_KEY, JSON.stringify(config));
+    } else {
+      localStorage.removeItem(BRIDGE_STORAGE_KEY);
+    }
+  };
+
+  // When bridged, chat requests go to the local machine through the tunnel.
+  const transport = useMemo(() => {
+    if (!bridge?.url) return undefined;
+    return new DefaultChatTransport({
+      api: `${bridge.url.replace(/\/+$/, "")}/api/chat`,
+      headers: bridge.key ? { "x-sinister-key": bridge.key } : undefined,
+    });
+  }, [bridge]);
+
   const {
     messages,
     sendMessage,
@@ -237,6 +373,7 @@ export default function Chat() {
     error,
     addToolApprovalResponse,
   } = useChat({
+    transport,
     // Auto-send once the user has responded to every pending approval.
     sendAutomaticallyWhen: lastAssistantMessageIsCompleteWithApprovalResponses,
   });
@@ -265,6 +402,11 @@ export default function Chat() {
             <span className="ml-3 text-xs font-normal tracking-normal text-cyan-300/70">
               local-first coding agent
             </span>
+            {bridge && (
+              <span className="rave-btn ml-3 rounded-md px-2 py-0.5 align-middle font-mono text-[10px] font-bold">
+                ⚡ LOCAL BRIDGE
+              </span>
+            )}
           </h1>
         </header>
 
@@ -378,6 +520,10 @@ export default function Chat() {
           </form>
         </footer>
       </div>
+
+      {bridgeOpen && (
+        <BridgeModal current={bridge} onSave={saveBridge} onClose={() => setBridgeOpen(false)} />
+      )}
     </div>
   );
 }

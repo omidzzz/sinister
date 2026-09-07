@@ -9,7 +9,7 @@
   type ModelMessage,
 } from "ai";
 import { groqModel } from "@/lib/ai/provider";
-import { SYSTEM_PROMPT } from "@/lib/ai/system-prompt";
+import { SYSTEM_PROMPT, GUEST_SYSTEM_PROMPT } from "@/lib/ai/system-prompt";
 import { agentTools } from "@/lib/agent/tools";
 import { agentWriteTools } from "@/lib/agent/write-tools";
 import {
@@ -98,11 +98,46 @@ function sanitizeForGroq(messages: ModelMessage[]): ModelMessage[] {
   });
 }
 
+/** ── Phase 4: split deployment ──────────────────────────────────────────── */
+
+/** "public" (Vercel guest deployment) vs local full-agent mode. */
+const IS_PUBLIC = process.env.AGENT_MODE === "public";
+
+/**
+ * Shared secret for the Cloudflare Tunnel bridge. Set AGENT_KEY on the local
+ * machine; the deployed site's UI sends it in the x-sinister-key header, so
+ * strangers who discover the tunnel URL still can't drive your filesystem.
+ * Unset = open access (the Vercel guest chat).
+ */
+function isAuthorized(req: Request): boolean {
+  const agentKey = process.env.AGENT_KEY;
+  if (!agentKey) return true;
+  return req.headers.get("x-sinister-key") === agentKey;
+}
+
+const CORS_HEADERS: Record<string, string> = {
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Methods": "POST, GET, OPTIONS",
+  "Access-Control-Allow-Headers": "Content-Type, x-sinister-key",
+};
+
+/** Preflight for cross-origin bridge requests from the deployed site. */
+export async function OPTIONS() {
+  return new Response(null, { status: 204, headers: CORS_HEADERS });
+}
+
 export async function POST(req: Request) {
+  if (!isAuthorized(req)) {
+    return Response.json(
+      { error: "Unauthorized. This agent requires the x-sinister-key header." },
+      { status: 401, headers: CORS_HEADERS },
+    );
+  }
+
   if (!process.env.GROQ_API_KEY) {
     return Response.json(
       { error: "GROQ_API_KEY is not set. Add it to .env.local." },
-      { status: 500 },
+      { status: 500, headers: CORS_HEADERS },
     );
   }
 
@@ -111,13 +146,20 @@ export async function POST(req: Request) {
     await convertToModelMessages(messages),
   );
 
+  // Public deployment: no tools at all — pure client-facing chat.
+  const publicSystem =
+    summary
+      ? `${GUEST_SYSTEM_PROMPT}\n\nSummary of the earlier conversation:\n${summary}`
+      : GUEST_SYSTEM_PROMPT;
+  const localSystem = summary
+    ? `${SYSTEM_PROMPT}\n\nSummary of the earlier conversation (older messages were trimmed to stay under the token budget):\n${summary}`
+    : SYSTEM_PROMPT;
+
   const result = streamText({
     model: groqModel(),
-    system: summary
-      ? `${SYSTEM_PROMPT}\n\nSummary of the earlier conversation (older messages were trimmed to stay under the token budget):\n${summary}`
-      : SYSTEM_PROMPT,
+    system: IS_PUBLIC ? publicSystem : localSystem,
     messages: budgetedMessages,
-    tools: { ...agentTools, ...agentWriteTools, ...terminalTool },
+    tools: IS_PUBLIC ? undefined : { ...agentTools, ...agentWriteTools, ...terminalTool },
     // The ReAct loop: after a tool result the model is called again to decide
     // its next step (Act & Observe), for at most 10 steps per user message.
     stopWhen: isStepCount(10),
@@ -145,7 +187,7 @@ export async function POST(req: Request) {
     experimental_toolApprovalSecret: process.env.TOOL_APPROVAL_SECRET,
   });
 
-  return createUIMessageStreamResponse({
+  const response = createUIMessageStreamResponse({
     stream: toUIMessageStream({
       stream: result.stream,
       onError: (error) => {
@@ -156,4 +198,10 @@ export async function POST(req: Request) {
       },
     }),
   });
+  // Allow cross-origin bridge requests from the deployed site to this local
+  // machine (Cloudflare Tunnel → localhost).
+  for (const [key, value] of Object.entries(CORS_HEADERS)) {
+    response.headers.set(key, value);
+  }
+  return response;
 }
