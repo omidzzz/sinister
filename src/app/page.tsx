@@ -3,6 +3,76 @@
 import { useChat } from "@ai-sdk/react";
 import { useEffect, useRef, useState } from "react";
 
+/** Loose shape of a tool part in the UI message stream. */
+type LooseToolPart = {
+  type: string; // "tool-<name>"
+  toolCallId: string;
+  state:
+    | "input-streaming"
+    | "input-available"
+    | "output-available"
+    | "output-error";
+  input?: unknown;
+  output?: unknown;
+  errorText?: string;
+};
+
+const STATE_LABEL: Record<LooseToolPart["state"], string> = {
+  "input-streaming": "running…",
+  "input-available": "running…",
+  "output-available": "done",
+  "output-error": "error",
+};
+
+function ToolPartView({ part }: { part: LooseToolPart }) {
+  const toolName = part.type.replace(/^tool-/, "");
+  const summary =
+    part.state === "output-available" &&
+    typeof part.output === "object" &&
+    part.output !== null
+      ? (part.output as { matchCount?: number; totalLines?: number }).matchCount ??
+        (part.output as { totalLines?: number }).totalLines
+      : undefined;
+
+  return (
+    <details className="rounded-xl border border-black/[.08] bg-white px-3 py-2 text-xs dark:border-white/[.145] dark:bg-[#111]">
+      <summary className="cursor-pointer list-none font-mono text-zinc-600 dark:text-zinc-400">
+        <span
+          className={
+            part.state === "output-error"
+              ? "mr-1.5 inline-block h-2 w-2 rounded-full bg-red-500"
+              : part.state === "output-available"
+                ? "mr-1.5 inline-block h-2 w-2 rounded-full bg-emerald-500"
+                : "mr-1.5 inline-block h-2 w-2 animate-pulse rounded-full bg-amber-400"
+          }
+        />
+        {toolName} · {STATE_LABEL[part.state]}
+        {summary !== undefined ? ` · ${summary}` : ""}
+      </summary>
+      <div className="mt-2 max-h-64 space-y-2 overflow-y-auto font-mono whitespace-pre-wrap text-[11px] text-zinc-500 dark:text-zinc-500">
+        {part.input !== undefined && (
+          <div>input: {JSON.stringify(part.input, null, 2)}</div>
+        )}
+        {part.state === "output-error" && part.errorText && (
+          <div className="text-red-500">error: {part.errorText}</div>
+        )}
+        {part.state === "output-available" &&
+          (() => {
+            const text = JSON.stringify(part.output, null, 2);
+            return text.length > 2000 ? (
+              <div>
+                {text.slice(0, 2000)}
+                {"\n… (output truncated)"}
+              </div>
+            ) : (
+              <div>output: {text}</div>
+            );
+          })()}
+      </div>
+    </details>
+  );
+}
+
 export default function Chat() {
   const [input, setInput] = useState("");
   const { messages, sendMessage, status, error } = useChat();
@@ -44,6 +114,14 @@ export default function Chat() {
               }
             >
               {message.parts.map((part, i) => {
+                if (part.type.startsWith("tool-")) {
+                  return (
+                    <ToolPartView
+                      key={`${message.id}-${i}`}
+                      part={part as unknown as LooseToolPart}
+                    />
+                  );
+                }
                 switch (part.type) {
                   case "text":
                     return <div key={`${message.id}-${i}`}>{part.text}</div>;

@@ -3,10 +3,12 @@ import {
   convertToModelMessages,
   createUIMessageStreamResponse,
   toUIMessageStream,
+  isStepCount,
   type UIMessage,
 } from "ai";
 import { groq, GROQ_MODEL } from "@/lib/ai/provider";
 import { SYSTEM_PROMPT } from "@/lib/ai/system-prompt";
+import { agentTools } from "@/lib/agent/tools";
 
 export const maxDuration = 60;
 
@@ -24,6 +26,10 @@ export async function POST(req: Request) {
     model: groq(GROQ_MODEL),
     system: SYSTEM_PROMPT,
     messages: await convertToModelMessages(messages),
+    tools: agentTools,
+    // The ReAct loop: after a tool result the model is called again to decide
+    // its next step (Act & Observe), for at most 10 steps per user message.
+    stopWhen: isStepCount(10),
   });
 
   return createUIMessageStreamResponse({
