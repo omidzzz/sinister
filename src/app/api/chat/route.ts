@@ -10,6 +10,7 @@
 } from "ai";
 import { groqModel } from "@/lib/ai/provider";
 import { SYSTEM_PROMPT, GUEST_SYSTEM_PROMPT } from "@/lib/ai/system-prompt";
+import { PORTFOLIO_KNOWLEDGE } from "@/lib/ai/portfolio";
 import { agentTools } from "@/lib/agent/tools";
 import { agentWriteTools } from "@/lib/agent/write-tools";
 import {
@@ -146,11 +147,12 @@ export async function POST(req: Request) {
     await convertToModelMessages(messages),
   );
 
-  // Public deployment: no tools at all — pure client-facing chat.
+  // Public deployment: no tools — the persona + portfolio dossier carry the
+  // whole answer. The summarizer note keeps its placement inside the prompt.
   const publicSystem =
     summary
-      ? `${GUEST_SYSTEM_PROMPT}\n\nSummary of the earlier conversation:\n${summary}`
-      : GUEST_SYSTEM_PROMPT;
+      ? `${GUEST_SYSTEM_PROMPT}\n\n${PORTFOLIO_KNOWLEDGE}\n\nSummary of the earlier conversation:\n${summary}`
+      : `${GUEST_SYSTEM_PROMPT}\n\n${PORTFOLIO_KNOWLEDGE}`;
   const localSystem = summary
     ? `${SYSTEM_PROMPT}\n\nSummary of the earlier conversation (older messages were trimmed to stay under the token budget):\n${summary}`
     : SYSTEM_PROMPT;
