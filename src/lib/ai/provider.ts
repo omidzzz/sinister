@@ -10,9 +10,13 @@ export const groq = createOpenAI({
   apiKey: process.env.GROQ_API_KEY,
 });
 
-/**
- * Model is configurable via .env.local (GROQ_MODEL=...) so we can swap models
- * without code changes. Verified against Groq's live catalog via /api/models;
- * run `GET /api/models` locally to see what your key can access.
- */
 export const GROQ_MODEL = process.env.GROQ_MODEL ?? "openai/gpt-oss-120b";
+
+/**
+ * Model factory. `.chat(...)` forces the Chat Completions API — the default
+ * Responses API path breaks multi-turn conversations on Groq (it replays
+ * assistant items in a format Groq rejects with "unsupported content fields").
+ * Configurable via .env.local (GROQ_MODEL=...); verified against Groq's live
+ * catalog via GET /api/models.
+ */
+export const groqModel = () => groq.chat(GROQ_MODEL);

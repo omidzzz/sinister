@@ -290,4 +290,44 @@ export const agentTools = {
       }
     },
   }),
+
+  scratchpad: tool({
+    description:
+      "Persistent scratchpad stored at .ai_context in the project root (Phase 2 'Sequential Thinking'). Use it to record your plan, findings, and progress during long multi-step operations so you never lose track. Read it at the start of a long task if it exists; append observations as you go.",
+    inputSchema: z.object({
+      action: z.enum(["read", "append", "overwrite"]).describe(
+        "read: get current notes; append: add to the end; overwrite: replace all notes (use for starting a fresh task plan).",
+      ),
+      content: z
+        .string()
+        .optional()
+        .describe("The note text (required for append/overwrite, ignored for read)."),
+    }),
+    execute: async ({ action, content }) => {
+      try {
+        const scratchPath = resolveSafePath(".ai_context");
+        if (action === "read") {
+          try {
+            const notes = await fs.readFile(scratchPath, "utf8");
+            return { ok: true, action, notes };
+          } catch {
+            return { ok: true, action, notes: "(scratchpad is empty)" };
+          }
+        }
+        if (typeof content !== "string" || content.trim() === "") {
+          return { ok: false, error: "content is required for append/overwrite." };
+        }
+        if (action === "append") {
+          await fs.appendFile(scratchPath, `\n${content}`, "utf8");
+        } else {
+          await fs.writeFile(scratchPath, content, "utf8");
+        }
+        const notes = await fs.readFile(scratchPath, "utf8");
+        return { ok: true, action, notes };
+      } catch (error) {
+        return toolError(error);
+      }
+    },
+  }),
 };
+
