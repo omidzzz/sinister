@@ -11,6 +11,7 @@
 import { groqModel } from "@/lib/ai/provider";
 import { SYSTEM_PROMPT, GUEST_SYSTEM_PROMPT } from "@/lib/ai/system-prompt";
 import { PORTFOLIO_KNOWLEDGE } from "@/lib/ai/portfolio";
+import { extractLastUserText, logExchange } from "@/lib/research/chat-store";
 import { agentTools } from "@/lib/agent/tools";
 import { agentWriteTools } from "@/lib/agent/write-tools";
 import {
@@ -142,11 +143,28 @@ export async function POST(req: Request) {
     );
   }
 
-  const { messages, context }: { messages: UIMessage[]; context?: unknown } =
-    await req.json();
+  const {
+    messages,
+    context,
+    sessionId,
+    locale,
+  }: {
+    messages: UIMessage[];
+    context?: unknown;
+    sessionId?: unknown;
+    locale?: unknown;
+  } = await req.json();
   const { messages: budgetedMessages, summary } = await applyTokenBudget(
     await convertToModelMessages(messages),
   );
+
+  // ── Research logging (feature-flagged by RESEARCH_DATABASE_URL) ──
+  const startedAt = Date.now();
+  const researchSessionId =
+    typeof sessionId === "string" && sessionId.length > 0 ? sessionId : null;
+  const researchLocale = typeof locale === "string" ? locale : null;
+  const researchUserText = extractLastUserText(messages);
+  const researchUserAgent = req.headers.get("user-agent");
 
   // Optional live post index (JSON sent by the portfolio widget, fetched
   // from the site's own feed at request time). Capped hard so a tampered
@@ -193,6 +211,27 @@ export async function POST(req: Request) {
     // HMAC-signs approval requests so a tampered client cannot forge an
     // approval (fail-closed verification on replay).
     experimental_toolApprovalSecret: process.env.TOOL_APPROVAL_SECRET,
+    // Persist the exchange once generation completes. Logging is a no-op
+    // unless RESEARCH_DATABASE_URL is configured; failures never surface
+    // into the stream.
+    onFinish: (event) => {
+      const usage = (
+        event as unknown as {
+          totalUsage?: { inputTokens?: number; outputTokens?: number };
+        }
+      ).totalUsage;
+      void logExchange({
+        sessionId: researchSessionId,
+        mode: IS_PUBLIC ? "public" : "local",
+        locale: researchLocale,
+        userText: researchUserText,
+        assistantText: event.text,
+        inputTokens: usage?.inputTokens ?? null,
+        outputTokens: usage?.outputTokens ?? null,
+        latencyMs: Date.now() - startedAt,
+        userAgent: researchUserAgent,
+      });
+    },
   });
 
   const response = createUIMessageStreamResponse({
