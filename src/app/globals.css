@@ -24,3 +24,111 @@ body {
   color: var(--foreground);
   font-family: Arial, Helvetica, sans-serif;
 }
+
+/* ── Acid rave theme ─────────────────────────────────────────────── */
+
+@keyframes rave-shift {
+  0% {
+    background-position: 0% 50%;
+  }
+  100% {
+    background-position: 300% 50%;
+  }
+}
+
+@keyframes rave-pulse {
+  0%,
+  100% {
+    filter: drop-shadow(0 0 6px rgba(255, 0, 234, 0.7))
+      drop-shadow(0 0 18px rgba(0, 229, 255, 0.4));
+  }
+  50% {
+    filter: drop-shadow(0 0 12px rgba(57, 255, 20, 0.8))
+      drop-shadow(0 0 28px rgba(255, 0, 234, 0.5));
+  }
+}
+
+@keyframes rave-spin-glow {
+  0%,
+  100% {
+    box-shadow:
+      0 0 8px rgba(255, 0, 234, 0.5),
+      0 0 24px rgba(0, 229, 255, 0.25);
+  }
+  33% {
+    box-shadow:
+      0 0 8px rgba(57, 255, 20, 0.5),
+      0 0 24px rgba(255, 0, 234, 0.25);
+  }
+  66% {
+    box-shadow:
+      0 0 8px rgba(0, 229, 255, 0.5),
+      0 0 24px rgba(57, 255, 20, 0.25);
+  }
+}
+
+/* Animated multicolour gradient wash used behind the whole app */
+.rave-bg {
+  background: linear-gradient(
+    270deg,
+    #ff00ea,
+    #7b2ff7,
+    #00e5ff,
+    #39ff14,
+    #ff2079,
+    #ff00ea
+  );
+  background-size: 300% 300%;
+  animation: rave-shift 14s linear infinite;
+}
+
+/* Neon gradient headline text */
+.rave-text {
+  background: linear-gradient(90deg, #ff00ea, #00e5ff, #39ff14, #ff00ea);
+  background-size: 300% 100%;
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  animation: rave-shift 6s linear infinite;
+  filter: drop-shadow(0 0 10px rgba(255, 0, 234, 0.45));
+}
+
+/* Gradient border: wrap an element, inner content sits on .rave-panel */
+.rave-border {
+  background: linear-gradient(135deg, #ff00ea, #00e5ff, #39ff14, #ff00ea);
+  background-size: 300% 300%;
+  animation: rave-shift 8s linear infinite;
+}
+
+.rave-panel {
+  background: rgba(8, 6, 18, 0.92);
+}
+
+.rave-glow {
+  animation: rave-spin-glow 5s ease-in-out infinite;
+}
+
+.rave-title {
+  animation: rave-pulse 3s ease-in-out infinite;
+}
+
+.rave-btn {
+  background: linear-gradient(90deg, #ff00ea, #00e5ff);
+  background-size: 200% 100%;
+  color: #05010d;
+  animation: rave-shift 4s linear infinite;
+  box-shadow: 0 0 14px rgba(255, 0, 234, 0.55);
+}
+
+.rave-btn:hover {
+  transform: scale(1.04);
+  box-shadow:
+    0 0 20px rgba(255, 0, 234, 0.8),
+    0 0 40px rgba(0, 229, 255, 0.4);
+}
+
+.rave-btn-deny {
+  background: linear-gradient(90deg, #ff2079, #ff5e00);
+  box-shadow: 0 0 14px rgba(255, 32, 121, 0.55);
+}
+
