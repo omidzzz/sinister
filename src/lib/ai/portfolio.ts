@@ -45,6 +45,10 @@ inlined into <style>, images optimized, decorative shells lazy-mounted on
 first interaction, Lighthouse-budgeted. Deploys as a fully static bundle.
 
 THE BLOG (12 posts — cite by title when relevant)
+NOTE: a LIVE POST INDEX may be appended after this dossier with posts fetched
+from the site's feed at request time — including posts newer than this list.
+When present, trust the LIVE POST INDEX for what currently exists on the blog;
+the list below is the evergreen baseline.
 - AI coding agents: "Claude Code vs Cline: Which AI Coding Agent Should
   Developers Use in 2026?", "Cline: The Open-Source AI Coding Agent
   Redefining Developer Workflows"

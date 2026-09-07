@@ -142,17 +142,23 @@ export async function POST(req: Request) {
     );
   }
 
-  const { messages }: { messages: UIMessage[] } = await req.json();
+  const { messages, context }: { messages: UIMessage[]; context?: unknown } =
+    await req.json();
   const { messages: budgetedMessages, summary } = await applyTokenBudget(
     await convertToModelMessages(messages),
   );
 
+  // Optional live post index (JSON sent by the portfolio widget, fetched
+  // from the site's own feed at request time). Capped hard so a tampered
+  // client can't blow the token budget.
+  const liveContext =
+    typeof context === "string" && context.trim().length > 0
+      ? `\n\n— LIVE POST INDEX (fetched from the site's feed at request time; for anything in it, this SUPERSEDES the dossier's blog list) —\n${context.trim().slice(0, 4_000)}`
+      : "";
+
   // Public deployment: no tools — the persona + portfolio dossier carry the
   // whole answer. The summarizer note keeps its placement inside the prompt.
-  const publicSystem =
-    summary
-      ? `${GUEST_SYSTEM_PROMPT}\n\n${PORTFOLIO_KNOWLEDGE}\n\nSummary of the earlier conversation:\n${summary}`
-      : `${GUEST_SYSTEM_PROMPT}\n\n${PORTFOLIO_KNOWLEDGE}`;
+  const publicSystem = `${GUEST_SYSTEM_PROMPT}\n\n${PORTFOLIO_KNOWLEDGE}${liveContext}${summary ? `\n\nSummary of the earlier conversation:\n${summary}` : ""}`;
   const localSystem = summary
     ? `${SYSTEM_PROMPT}\n\nSummary of the earlier conversation (older messages were trimmed to stay under the token budget):\n${summary}`
     : SYSTEM_PROMPT;

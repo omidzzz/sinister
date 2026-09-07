@@ -2,8 +2,13 @@
 //   node scripts/test-guest-chat.mjs "question one" "question two"
 // Sends each question as a separate conversation and prints the assembled
 // reply text (useful for checking persona and opener variety).
+// Optional env:
+//   TEST_BASE   — target base URL (default http://localhost:3001)
+//   TEST_KEY    — x-sinister-key header (for local AGENT_KEY deployments)
+//   TEST_CONTEXT — extra `context` string sent with each request (live post index)
 const BASE = process.env.TEST_BASE ?? "http://localhost:3001";
 const key = process.env.TEST_KEY;
+const context = process.env.TEST_CONTEXT;
 
 const questions = process.argv.slice(2);
 if (questions.length === 0) {
@@ -19,6 +24,7 @@ for (const [i, q] of questions.entries()) {
       ...(key ? { "x-sinister-key": key } : {}),
     },
     body: JSON.stringify({
+      ...(context ? { context } : {}),
       messages: [
         {
           id: `test-${i}-${Date.now()}`,
