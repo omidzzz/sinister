@@ -52,14 +52,20 @@ async function ensureSchemaImpl(): Promise<void> {
       total_output_tokens INTEGER NOT NULL DEFAULT 0
     )
   `;
+  // Idempotent column additions for pre-existing tables (schema migrations).
+  await sql`ALTER TABLE sessions ADD COLUMN IF NOT EXISTS accept_language TEXT`;
+  await sql`ALTER TABLE sessions ADD COLUMN IF NOT EXISTS user_agent TEXT`;
+  await sql`ALTER TABLE sessions ADD COLUMN IF NOT EXISTS screen TEXT`;
+  await sql`ALTER TABLE sessions ADD COLUMN IF NOT EXISTS path TEXT`;
+  await sql`ALTER TABLE sessions ADD COLUMN IF NOT EXISTS locale TEXT`;
   await sql`
     CREATE TABLE IF NOT EXISTS messages (
       id            BIGSERIAL PRIMARY KEY,
       session_id    TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
-      seq           INTEGER NOT NULL,
-      role          TEXT NOT NULL,
-      content       TEXT NOT NULL,
-      mode          TEXT NOT NULL DEFAULT 'guest',
+      seq           INTEGER,
+      role          TEXT,
+      content       TEXT,
+      mode          TEXT,
       locale        TEXT,
       model         TEXT,
       input_tokens  INTEGER,
