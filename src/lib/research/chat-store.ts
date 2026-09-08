@@ -161,9 +161,14 @@ export function normalizeSessionId(raw: unknown): string | null {
 
 /** Upsert an anonymous session, then write the user → assistant pair. */
 export async function logExchange(entry: ChatExchange): Promise<void> {
-  if (!sql) return;
+  console.log("[research] logExchange called, sql initialized:", !!sql, "sessionId:", entry.sessionId);
+  if (!sql) {
+    console.log("[research] skipping — RESEARCH_DATABASE_URL not set, sql is null");
+    return;
+  }
   try {
     await ensureSchema();
+    console.log("[research] schema ensured, writing exchange...");
 
     const sid = cap(entry.sessionId, 64);
     if (!sid) return; // always need a session anchor
@@ -228,6 +233,7 @@ export async function logExchange(entry: ChatExchange): Promise<void> {
         total_output_tokens = total_output_tokens + ${entry.outputTokens ?? 0}
       WHERE session_id = ${sid}
     `;
+    console.log("[research] exchange written successfully for session:", sid);
   } catch (err) {
     console.error("[research] failed to log chat exchange:", err);
   }
