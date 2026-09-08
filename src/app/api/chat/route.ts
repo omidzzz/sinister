@@ -11,7 +11,7 @@
 import { groqModel } from "@/lib/ai/provider";
 import { SYSTEM_PROMPT, GUEST_SYSTEM_PROMPT } from "@/lib/ai/system-prompt";
 import { PORTFOLIO_KNOWLEDGE } from "@/lib/ai/portfolio";
-import { extractLastUserText, logExchange, normalizeSessionId } from "@/lib/research/chat-store";
+import { extractLastUserText, normalizeSessionId } from "@/lib/research/chat-store";
 import { agentTools } from "@/lib/agent/tools";
 import { agentWriteTools } from "@/lib/agent/write-tools";
 import {
@@ -222,34 +222,6 @@ export async function POST(req: Request) {
     // HMAC-signs approval requests so a tampered client cannot forge an
     // approval (fail-closed verification on replay).
     experimental_toolApprovalSecret: process.env.TOOL_APPROVAL_SECRET,
-    // Persist the exchange once generation completes. Logging is a no-op
-    // unless RESEARCH_DATABASE_URL is configured; failures never surface
-    // into the stream.
-    onFinish: (event) => {
-      const usage = (
-        event as unknown as {
-          totalUsage?: { inputTokens?: number; outputTokens?: number };
-        }
-      ).totalUsage;
-      void logExchange({
-        sessionId: researchSessionId,
-        mode: IS_PUBLIC ? "public" : "local",
-        locale: researchLocale,
-        userText: researchUserText,
-        assistantText: event.text,
-        inputTokens: usage?.inputTokens ?? null,
-        outputTokens: usage?.outputTokens ?? null,
-        latencyMs: Date.now() - startedAt,
-        userAgent: researchUserAgent,
-        country: researchCountry,
-        region: researchRegion,
-        city: researchCity,
-        referrer: researchReferrer,
-        acceptLanguage: researchAcceptLang,
-        path: researchPath,
-        screen: researchScreen,
-      });
-    },
   });
 
   const response = createUIMessageStreamResponse({
