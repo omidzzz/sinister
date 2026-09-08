@@ -226,7 +226,6 @@ export async function POST(req: Request) {
     // unless RESEARCH_DATABASE_URL is configured; failures never surface
     // into the stream.
     onFinish: (event) => {
-      console.log("[research] onFinish fired, event keys:", Object.keys(event as object));
       const usage = (
         event as unknown as {
           totalUsage?: { inputTokens?: number; outputTokens?: number };
