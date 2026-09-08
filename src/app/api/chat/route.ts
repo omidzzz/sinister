@@ -11,7 +11,7 @@
 import { groqModel } from "@/lib/ai/provider";
 import { SYSTEM_PROMPT, GUEST_SYSTEM_PROMPT } from "@/lib/ai/system-prompt";
 import { PORTFOLIO_KNOWLEDGE } from "@/lib/ai/portfolio";
-import { extractLastUserText, logExchange } from "@/lib/research/chat-store";
+import { extractLastUserText, logExchange, normalizeSessionId } from "@/lib/research/chat-store";
 import { agentTools } from "@/lib/agent/tools";
 import { agentWriteTools } from "@/lib/agent/write-tools";
 import {
@@ -148,11 +148,15 @@ export async function POST(req: Request) {
     context,
     sessionId,
     locale,
+    path,
+    screen,
   }: {
     messages: UIMessage[];
     context?: unknown;
     sessionId?: unknown;
     locale?: unknown;
+    path?: unknown;
+    screen?: unknown;
   } = await req.json();
   const { messages: budgetedMessages, summary } = await applyTokenBudget(
     await convertToModelMessages(messages),
@@ -160,11 +164,18 @@ export async function POST(req: Request) {
 
   // ── Research logging (feature-flagged by RESEARCH_DATABASE_URL) ──
   const startedAt = Date.now();
-  const researchSessionId =
-    typeof sessionId === "string" && sessionId.length > 0 ? sessionId : null;
+  const researchSessionId = normalizeSessionId(sessionId);
   const researchLocale = typeof locale === "string" ? locale : null;
   const researchUserText = extractLastUserText(messages);
   const researchUserAgent = req.headers.get("user-agent");
+  // Vercel geo headers (only present on Vercel; never the raw IP).
+  const researchCountry = req.headers.get("x-vercel-ip-country");
+  const researchRegion = req.headers.get("x-vercel-ip-country-region");
+  const researchCity = req.headers.get("x-vercel-ip-city");
+  const researchReferrer = req.headers.get("referer");
+  const researchAcceptLang = req.headers.get("accept-language");
+  const researchPath = typeof path === "string" ? path : null;
+  const researchScreen = typeof screen === "string" ? screen : null;
 
   // Optional live post index (JSON sent by the portfolio widget, fetched
   // from the site's own feed at request time). Capped hard so a tampered
@@ -230,6 +241,13 @@ export async function POST(req: Request) {
         outputTokens: usage?.outputTokens ?? null,
         latencyMs: Date.now() - startedAt,
         userAgent: researchUserAgent,
+        country: researchCountry,
+        region: researchRegion,
+        city: researchCity,
+        referrer: researchReferrer,
+        acceptLanguage: researchAcceptLang,
+        path: researchPath,
+        screen: researchScreen,
       });
     },
   });

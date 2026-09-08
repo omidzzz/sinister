@@ -6,9 +6,11 @@
 //   TEST_BASE   — target base URL (default http://localhost:3001)
 //   TEST_KEY    — x-sinister-key header (for local AGENT_KEY deployments)
 //   TEST_CONTEXT — extra `context` string sent with each request (live post index)
+//   TEST_SESSION — session_id to send (defaults to none; set to log research rows)
 const BASE = process.env.TEST_BASE ?? "http://localhost:3001";
 const key = process.env.TEST_KEY;
 const context = process.env.TEST_CONTEXT;
+const session = process.env.TEST_SESSION;
 
 const questions = process.argv.slice(2);
 if (questions.length === 0) {
@@ -25,6 +27,7 @@ for (const [i, q] of questions.entries()) {
     },
     body: JSON.stringify({
       ...(context ? { context } : {}),
+      ...(session ? { sessionId: session, path: "/en", screen: "1920x1080" } : {}),
       messages: [
         {
           id: `test-${i}-${Date.now()}`,

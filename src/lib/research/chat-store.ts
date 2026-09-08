@@ -1,42 +1,80 @@
 import postgres from "postgres";
+import { GROQ_MODEL } from "@/lib/ai/provider";
 
 /**
- * Research logging for guest chats — one row per user→assistant exchange.
+ * Research store for guest + local chats — a small relational schema so
+ * conversations are reconstructable and sessions carry usable visitor data.
  *
- * Feature-flagged by RESEARCH_DATABASE_URL: when unset, every call is a
- * no-op, so local dev and the public deployment are completely unaffected
- * until a database is wired up (Neon/Supabase/any Postgres — the driver is
- * serverless-safe with max:1 connections per lambda instance).
+ *   sessions  — one row per anonymous browser session (session_id is a UUID
+ *               the widget keeps in localStorage). Stores what we can
+ *               legitimately learn from the request: parsed OS/browser/device,
+ *               geo (from Vercel's IP headers — never the raw IP), referrer,
+ *               accept-language, screen size and entry path (sent by the UI).
+ *   messages  — one row per turn (role = user|assistant), ordered by `seq`
+ *               per session, so a full conversation can be replayed.
  *
- * Privacy posture: no IPs, no credentials, no cookies — just the
- * conversation content, an anonymous per-browser session id, the UI locale,
- * and a truncated user-agent for abuse triage. Text is length-capped so a
- * tampered client can't bloat rows.
+ * Feature-flagged by RESEARCH_DATABASE_URL: when unset every call is a no-op,
+ * so local dev / the public deployment are unaffected until a DB is wired up.
+ *
+ * Privacy posture: no raw IPs, no cookies, no credentials — only anonymous
+ * session ids. Text and every free-form field are length-capped so a tampered
+ * client can't bloat rows.
  */
 
 const sql = process.env.RESEARCH_DATABASE_URL
   ? postgres(process.env.RESEARCH_DATABASE_URL, { max: 1, idle_timeout: 20 })
   : null;
 
-/** Runs once per lambda instance; creates the table if it doesn't exist. */
+/** Runs once per lambda instance; creates tables + indexes. */
 let schemaReady: Promise<void> | null = null;
-function ensureSchema(): Promise<void> {
-  if (!sql) return Promise.resolve();
-  schemaReady ??= sql`
-    CREATE TABLE IF NOT EXISTS chat_logs (
-      id BIGSERIAL PRIMARY KEY,
-      created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-      session_id TEXT,
-      mode TEXT NOT NULL DEFAULT 'guest',
-      locale TEXT,
-      user_text TEXT NOT NULL,
-      assistant_text TEXT,
-      input_tokens INTEGER,
-      output_tokens INTEGER,
-      latency_ms INTEGER,
-      user_agent TEXT
+async function ensureSchemaImpl(): Promise<void> {
+  if (!sql) return;
+  await sql`
+    CREATE TABLE IF NOT EXISTS sessions (
+      session_id          TEXT PRIMARY KEY,
+      first_seen          TIMESTAMPTZ NOT NULL DEFAULT now(),
+      last_seen           TIMESTAMPTZ NOT NULL DEFAULT now(),
+      mode                TEXT NOT NULL DEFAULT 'guest',
+      locale              TEXT,
+      browser             TEXT,
+      os                  TEXT,
+      device              TEXT,
+      user_agent          TEXT,
+      country             TEXT,
+      region              TEXT,
+      city                TEXT,
+      referrer            TEXT,
+      accept_language     TEXT,
+      screen              TEXT,
+      path                TEXT,
+      message_count       INTEGER NOT NULL DEFAULT 0,
+      total_input_tokens  INTEGER NOT NULL DEFAULT 0,
+      total_output_tokens INTEGER NOT NULL DEFAULT 0
     )
-  `.then(() => undefined);
+  `;
+  await sql`
+    CREATE TABLE IF NOT EXISTS messages (
+      id            BIGSERIAL PRIMARY KEY,
+      session_id    TEXT NOT NULL REFERENCES sessions(session_id) ON DELETE CASCADE,
+      seq           INTEGER NOT NULL,
+      role          TEXT NOT NULL,
+      content       TEXT NOT NULL,
+      mode          TEXT NOT NULL DEFAULT 'guest',
+      locale        TEXT,
+      model         TEXT,
+      input_tokens  INTEGER,
+      output_tokens INTEGER,
+      latency_ms    INTEGER,
+      created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+    )
+  `;
+  await sql`CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id, seq)`;
+  await sql`CREATE INDEX IF NOT EXISTS idx_messages_created ON messages(created_at)`;
+  await sql`CREATE INDEX IF NOT EXISTS idx_sessions_last ON sessions(last_seen)`;
+  await sql`CREATE INDEX IF NOT EXISTS idx_sessions_country ON sessions(country)`;
+}
+function ensureSchema(): Promise<void> {
+  schemaReady ??= ensureSchemaImpl();
   return schemaReady;
 }
 
@@ -63,38 +101,132 @@ function cap(s: string | null | undefined, max = MAX_TEXT): string | null {
   return s.length <= max ? s : `${s.slice(0, max)}…`;
 }
 
-export type ChatExchange = {
+/** Lightweight UA → browser / OS / device hints (no dependency). */
+export function parseUserAgent(
+  ua: string | null,
+): { browser: string | null; os: string | null; device: string | null } {
+  if (!ua) return { browser: null, os: null, device: null };
+  const u = ua.toLowerCase();
+
+  const os =
+    /windows nt/.test(u) ? "Windows"
+    : /mac os x|macintosh/.test(u) ? "macOS"
+    : /iphone|ipod/.test(u) ? "iOS"
+    : /ipad/.test(u) ? "iPadOS"
+    : /android/.test(u) ? "Android"
+    : /linux/.test(u) ? "Linux"
+    : null;
+
+  const browser =
+    /edg\//.test(u) ? "Edge"
+    : /opr\//.test(u) ? "Opera"
+    : /chrome\//.test(u) ? "Chrome"
+    : /firefox\//.test(u) ? "Firefox"
+    : /safari\//.test(u) ? "Safari"
+    : null;
+
+  const device =
+    /ipad|tablet/.test(u) ? "tablet"
+    : /mobile|android|iphone|ipod/.test(u) ? "mobile"
+    : "desktop";
+
+  return { browser, os, device };
+}
+
+export type SessionProfile = {
   sessionId: string | null;
   mode: "public" | "local";
   locale: string | null;
+  userAgent: string | null;
+  country: string | null;
+  region: string | null;
+  city: string | null;
+  referrer: string | null;
+  acceptLanguage: string | null;
+  screen: string | null;
+  path: string | null;
+};
+
+export type ChatExchange = SessionProfile & {
   userText: string;
   assistantText: string | null;
   inputTokens: number | null;
   outputTokens: number | null;
   latencyMs: number | null;
-  userAgent: string | null;
 };
 
-/** Fire-and-forget: logging failures must never break the chat stream. */
+export function normalizeSessionId(raw: unknown): string | null {
+  return typeof raw === "string" && raw.length > 0 ? raw : null;
+}
+
+/** Upsert an anonymous session, then write the user → assistant pair. */
 export async function logExchange(entry: ChatExchange): Promise<void> {
   if (!sql) return;
   try {
     await ensureSchema();
+
+    const sid = cap(entry.sessionId, 64);
+    if (!sid) return; // always need a session anchor
+    const { browser, os, device } = parseUserAgent(entry.userAgent);
+
+    // 1. Session upsert — refresh dynamic fields, keep first_seen.
     await sql`
-      INSERT INTO chat_logs
-        (session_id, mode, locale, user_text, assistant_text,
-         input_tokens, output_tokens, latency_ms, user_agent)
-      VALUES (
-        ${cap(entry.sessionId, 64)},
-        ${entry.mode},
-        ${cap(entry.locale, 8)},
-        ${cap(entry.userText) ?? ""},
-        ${cap(entry.assistantText)},
-        ${entry.inputTokens},
-        ${entry.outputTokens},
-        ${entry.latencyMs},
-        ${cap(entry.userAgent, 200)}
-      )
+      INSERT INTO sessions
+        (session_id, first_seen, last_seen, mode, locale,
+         browser, os, device, user_agent,
+         country, region, city, referrer, accept_language, screen, path)
+      VALUES
+        (${sid}, now(), now(), ${entry.mode}, ${cap(entry.locale, 8)},
+         ${browser}, ${os}, ${device}, ${cap(entry.userAgent, 300)},
+         ${cap(entry.country, 64)}, ${cap(entry.region, 128)}, ${cap(entry.city, 128)},
+         ${cap(entry.referrer, 300)}, ${cap(entry.acceptLanguage, 200)},
+         ${cap(entry.screen, 24)}, ${cap(entry.path, 300)})
+      ON CONFLICT (session_id) DO UPDATE SET
+        last_seen = now(),
+        mode = EXCLUDED.mode,
+        locale = COALESCE(EXCLUDED.locale, sessions.locale),
+        browser = COALESCE(EXCLUDED.browser, sessions.browser),
+        os = COALESCE(EXCLUDED.os, sessions.os),
+        device = COALESCE(EXCLUDED.device, sessions.device),
+        country = COALESCE(EXCLUDED.country, sessions.country),
+        region = COALESCE(EXCLUDED.region, sessions.region),
+        city = COALESCE(EXCLUDED.city, sessions.city),
+        screen = COALESCE(EXCLUDED.screen, sessions.screen),
+        path = COALESCE(EXCLUDED.path, sessions.path)
+    `;
+
+    // 2. User turn, then assistant turn (each takes the next per-session seq).
+    for (const [role, content, inT, outT, lat] of [
+      ["user", entry.userText, null, null, null],
+      [
+        "assistant",
+        entry.assistantText ?? "",
+        entry.inputTokens,
+        entry.outputTokens,
+        entry.latencyMs,
+      ],
+    ] as const) {
+      await sql`
+        INSERT INTO messages
+          (session_id, seq, role, content, mode, locale, model,
+           input_tokens, output_tokens, latency_ms)
+        VALUES
+          (${sid},
+           (SELECT COALESCE(MAX(seq), 0) + 1 FROM messages WHERE session_id = ${sid}),
+           ${role}, ${cap(content, 16_000) ?? ""}, ${entry.mode},
+           ${cap(entry.locale, 8)}, ${GROQ_MODEL},
+           ${inT}, ${outT}, ${lat})
+      `;
+    }
+
+    // 3. Roll session counters forward.
+    await sql`
+      UPDATE sessions SET
+        message_count = message_count + 2,
+        last_seen = now(),
+        total_input_tokens = total_input_tokens + ${entry.inputTokens ?? 0},
+        total_output_tokens = total_output_tokens + ${entry.outputTokens ?? 0}
+      WHERE session_id = ${sid}
     `;
   } catch (err) {
     console.error("[research] failed to log chat exchange:", err);
