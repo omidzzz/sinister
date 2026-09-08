@@ -27,9 +27,7 @@ const sql = process.env.RESEARCH_DATABASE_URL
       idle_timeout: 20,
       connect_timeout: 10,
       prepare: false,
-      onclose: (connId) => console.log("[research] connection closed:", connId),
-      onconnect: (connId) => console.log("[research] connection opened:", connId),
-      onerror: (err) => console.error("[research] connection error:", err),
+      onclose: (connId: number) => console.log("[research] connection closed:", connId),
     })
   : null;
 
