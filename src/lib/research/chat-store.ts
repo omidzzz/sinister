@@ -22,56 +22,36 @@ import { GROQ_MODEL } from "@/lib/ai/provider";
  */
 
 const sql = process.env.RESEARCH_DATABASE_URL
-  ? postgres(process.env.RESEARCH_DATABASE_URL, { max: 1, idle_timeout: 20 })
+  ? postgres(process.env.RESEARCH_DATABASE_URL, {
+      max: 1,
+      idle_timeout: 20,
+      connect_timeout: 10,
+      prepare: false,
+      onclose: (connId) => console.log("[research] connection closed:", connId),
+      onconnect: (connId) => console.log("[research] connection opened:", connId),
+      onerror: (err) => console.error("[research] connection error:", err),
+    })
   : null;
 
 /** Runs once per lambda instance; creates tables + indexes. */
 let schemaReady: Promise<void> | null = null;
 async function ensureSchemaImpl(): Promise<void> {
   if (!sql) return;
-  await sql`
-    CREATE TABLE IF NOT EXISTS sessions (
-      session_id          TEXT PRIMARY KEY,
-      first_seen          TIMESTAMPTZ NOT NULL DEFAULT now(),
-      last_seen           TIMESTAMPTZ NOT NULL DEFAULT now(),
-      mode                TEXT NOT NULL DEFAULT 'guest',
-      locale              TEXT,
-      browser             TEXT,
-      os                  TEXT,
-      device              TEXT,
-      user_agent          TEXT,
-      country             TEXT,
-      region              TEXT,
-      city                TEXT,
-      referrer            TEXT,
-      accept_language     TEXT,
-      screen              TEXT,
-      path                TEXT,
-      message_count       INTEGER NOT NULL DEFAULT 0,
-      total_input_tokens  INTEGER NOT NULL DEFAULT 0,
-      total_output_tokens INTEGER NOT NULL DEFAULT 0
-    )
-  `;
-  await sql`
-    CREATE TABLE IF NOT EXISTS messages (
-      id            BIGSERIAL PRIMARY KEY,
-      session_id    TEXT NOT NULL REFERENCES sessions(session_id) ON DELETE CASCADE,
-      seq           INTEGER NOT NULL,
-      role          TEXT NOT NULL,
-      content       TEXT NOT NULL,
-      mode          TEXT NOT NULL DEFAULT 'guest',
-      locale        TEXT,
-      model         TEXT,
-      input_tokens  INTEGER,
-      output_tokens INTEGER,
-      latency_ms    INTEGER,
-      created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
-    )
-  `;
-  await sql`CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id, seq)`;
-  await sql`CREATE INDEX IF NOT EXISTS idx_messages_created ON messages(created_at)`;
-  await sql`CREATE INDEX IF NOT EXISTS idx_sessions_last ON sessions(last_seen)`;
-  await sql`CREATE INDEX IF NOT EXISTS idx_sessions_country ON sessions(country)`;
+  console.log("[research] ensureSchema: starting...");
+  const queries = [
+    "CREATE TABLE IF NOT EXISTS sessions (session_id TEXT PRIMARY KEY, first_seen TIMESTAMPTZ NOT NULL DEFAULT now(), last_seen TIMESTAMPTZ NOT NULL DEFAULT now(), mode TEXT NOT NULL DEFAULT 'guest', locale TEXT, browser TEXT, os TEXT, device TEXT, user_agent TEXT, country TEXT, region TEXT, city TEXT, referrer TEXT, accept_language TEXT, screen TEXT, path TEXT, message_count INTEGER NOT NULL DEFAULT 0, total_input_tokens INTEGER NOT NULL DEFAULT 0, total_output_tokens INTEGER NOT NULL DEFAULT 0)",
+    "CREATE TABLE IF NOT EXISTS messages (id BIGSERIAL PRIMARY KEY, session_id TEXT NOT NULL REFERENCES sessions(session_id) ON DELETE CASCADE, seq INTEGER NOT NULL, role TEXT NOT NULL, content TEXT NOT NULL, mode TEXT NOT NULL DEFAULT 'guest', locale TEXT, model TEXT, input_tokens INTEGER, output_tokens INTEGER, latency_ms INTEGER, created_at TIMESTAMPTZ NOT NULL DEFAULT now())",
+    "CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id, seq)",
+    "CREATE INDEX IF NOT EXISTS idx_messages_created ON messages(created_at)",
+    "CREATE INDEX IF NOT EXISTS idx_sessions_last ON sessions(last_seen)",
+    "CREATE INDEX IF NOT EXISTS idx_sessions_country ON sessions(country)",
+  ];
+  for (let i = 0; i < queries.length; i++) {
+    console.log(`[research] ensureSchema: running query ${i + 1}/${queries.length}...`);
+    await sql.unsafe(queries[i]);
+    console.log(`[research] ensureSchema: query ${i + 1} done`);
+  }
+  console.log("[research] ensureSchema: all queries complete");
 }
 function ensureSchema(): Promise<void> {
   schemaReady ??= ensureSchemaImpl();
