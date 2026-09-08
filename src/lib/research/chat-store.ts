@@ -5,7 +5,7 @@ import { GROQ_MODEL } from "@/lib/ai/provider";
  * Research store for guest + local chats — a small relational schema so
  * conversations are reconstructable and sessions carry usable visitor data.
  *
- *   sessions  — one row per anonymous browser session (session_id is a UUID
+ *   sessions  — one row per anonymous browser session (id is a UUID
  *               the widget keeps in localStorage). Stores what we can
  *               legitimately learn from the request: parsed OS/browser/device,
  *               geo (from Vercel's IP headers — never the raw IP), referrer,
@@ -31,7 +31,7 @@ async function ensureSchemaImpl(): Promise<void> {
   if (!sql) return;
   await sql`
     CREATE TABLE IF NOT EXISTS sessions (
-      session_id          TEXT PRIMARY KEY,
+      id                  TEXT PRIMARY KEY,
       first_seen          TIMESTAMPTZ NOT NULL DEFAULT now(),
       last_seen           TIMESTAMPTZ NOT NULL DEFAULT now(),
       mode                TEXT NOT NULL DEFAULT 'guest',
@@ -55,7 +55,7 @@ async function ensureSchemaImpl(): Promise<void> {
   await sql`
     CREATE TABLE IF NOT EXISTS messages (
       id            BIGSERIAL PRIMARY KEY,
-      session_id    TEXT NOT NULL REFERENCES sessions(session_id) ON DELETE CASCADE,
+      session_id    TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
       seq           INTEGER NOT NULL,
       role          TEXT NOT NULL,
       content       TEXT NOT NULL,
@@ -172,7 +172,7 @@ export async function logExchange(entry: ChatExchange): Promise<void> {
     // 1. Session upsert — refresh dynamic fields, keep first_seen.
     await sql`
       INSERT INTO sessions
-        (session_id, first_seen, last_seen, mode, locale,
+        (id, first_seen, last_seen, mode, locale,
          browser, os, device, user_agent,
          country, region, city, referrer, accept_language, screen, path)
       VALUES
@@ -181,7 +181,7 @@ export async function logExchange(entry: ChatExchange): Promise<void> {
          ${cap(entry.country, 64)}, ${cap(entry.region, 128)}, ${cap(entry.city, 128)},
          ${cap(entry.referrer, 300)}, ${cap(entry.acceptLanguage, 200)},
          ${cap(entry.screen, 24)}, ${cap(entry.path, 300)})
-      ON CONFLICT (session_id) DO UPDATE SET
+      ON CONFLICT (id) DO UPDATE SET
         last_seen = now(),
         mode = EXCLUDED.mode,
         locale = COALESCE(EXCLUDED.locale, sessions.locale),
@@ -226,7 +226,7 @@ export async function logExchange(entry: ChatExchange): Promise<void> {
         last_seen = now(),
         total_input_tokens = total_input_tokens + ${entry.inputTokens ?? 0},
         total_output_tokens = total_output_tokens + ${entry.outputTokens ?? 0}
-      WHERE session_id = ${sid}
+      WHERE id = ${sid}
     `;
   } catch (err) {
     console.error("[research] failed to log chat exchange:", err);
