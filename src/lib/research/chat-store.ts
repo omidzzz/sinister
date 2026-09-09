@@ -78,6 +78,8 @@ async function ensureSchemaImpl(): Promise<void> {
   await sql`CREATE INDEX IF NOT EXISTS idx_messages_created ON messages(created_at)`;
   await sql`CREATE INDEX IF NOT EXISTS idx_sessions_last ON sessions(last_seen)`;
   await sql`CREATE INDEX IF NOT EXISTS idx_sessions_country ON sessions(country)`;
+  // Idempotent rating column for pre-existing messages tables.
+  await sql`ALTER TABLE messages ADD COLUMN IF NOT EXISTS rating INTEGER`;
 }
 function ensureSchema(): Promise<void> {
   schemaReady ??= ensureSchemaImpl();
@@ -161,6 +163,12 @@ export type ChatExchange = SessionProfile & {
   latencyMs: number | null;
 };
 
+/** A visitor's quality signal on the most recent assistant reply. */
+export type MessageRating = {
+  sessionId: string;
+  rating: 1 | -1;
+};
+
 export function normalizeSessionId(raw: unknown): string | null {
   return typeof raw === "string" && raw.length > 0 ? raw : null;
 }
@@ -236,5 +244,29 @@ export async function logExchange(entry: ChatExchange): Promise<void> {
     `;
   } catch (err) {
     console.error("[research] failed to log chat exchange:", err);
+  }
+}
+
+/**
+ * Record a visitor's quality signal (1 = useful, -1 = not) on the most
+ * recent assistant reply of the session. Best-effort: never throws.
+ */
+export async function logRating(entry: MessageRating): Promise<void> {
+  if (!sql) return;
+  const sid = cap(entry.sessionId, 64);
+  if (!sid) return;
+  try {
+    await ensureSchema();
+    await sql`
+      UPDATE messages SET rating = ${entry.rating}
+      WHERE id = (
+        SELECT id FROM messages
+        WHERE session_id = ${sid} AND role = 'assistant'
+        ORDER BY seq DESC
+        LIMIT 1
+      )
+    `;
+  } catch (err) {
+    console.error("[research] failed to log rating:", err);
   }
 }

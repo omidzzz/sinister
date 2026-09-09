@@ -1,5 +1,9 @@
 import { NextRequest, NextResponse } from "next/server";
-import { logExchange, normalizeSessionId } from "@/lib/research/chat-store";
+import {
+  logExchange,
+  logRating,
+  normalizeSessionId,
+} from "@/lib/research/chat-store";
 
 const CORS_HEADERS = {
   "Access-Control-Allow-Origin": "*",
@@ -28,6 +32,12 @@ export async function POST(req: NextRequest) {
         { ok: false, error: "missing session id" },
         { status: 400 },
       );
+    }
+
+    // Reaction path: a bare quality signal on the latest assistant reply.
+    if (body.rating === 1 || body.rating === -1) {
+      await logRating({ sessionId, rating: body.rating });
+      return NextResponse.json({ ok: true }, { headers: CORS_HEADERS });
     }
 
     await logExchange({

@@ -2,6 +2,7 @@ import {
   streamText,
   generateText,
   convertToModelMessages,
+  createUIMessageStream,
   createUIMessageStreamResponse,
   toUIMessageStream,
   isStepCount,
@@ -13,6 +14,7 @@ import { SYSTEM_PROMPT, GUEST_SYSTEM_PROMPT } from "@/lib/ai/system-prompt";
 import {
   GUEST_LOCALE_DIRECTIVES,
   GUEST_UNHIGNED_ADDENDUM,
+  profileDirective,
 } from "@/lib/ai/system-prompt";
 import { PORTFOLIO_KNOWLEDGE } from "@/lib/ai/portfolio";
 import {
@@ -182,6 +184,7 @@ export async function POST(req: Request) {
     sessionId,
     locale,
     persona,
+    profile,
     path,
     screen,
   }: {
@@ -189,6 +192,7 @@ export async function POST(req: Request) {
     sessionId?: unknown;
     locale?: unknown;
     persona?: unknown;
+    profile?: unknown;
     path?: unknown;
     screen?: unknown;
   } = await req.json();
@@ -245,10 +249,16 @@ export async function POST(req: Request) {
   // Public deployment: no tools � the persona + portfolio dossier carry the
   // whole answer. The summarizer note keeps its placement inside the prompt.
   // Locale pins the default reply language; "unhinged" (unlocked via the
-  // portfolio's terminal easter egg) appends the max-volatility addendum.
+  // portfolio's terminal easter egg) appends the max-volatility addendum;
+  // a visitor-supplied nickname (sanitized) is remembered via profile.
+  const visitorName =
+    typeof profile === "string" && profile.trim()
+      ? profile.trim().replace(/[\r\n\\`$"]/g, "").slice(0, 40)
+      : null;
   const guestDirectives = [
     typeof locale === "string" ? GUEST_LOCALE_DIRECTIVES[locale] : undefined,
     persona === "unhinged" ? GUEST_UNHIGNED_ADDENDUM : undefined,
+    visitorName ? profileDirective(visitorName) : undefined,
   ]
     .filter(Boolean)
     .join("\n\n");
@@ -289,14 +299,46 @@ export async function POST(req: Request) {
     experimental_toolApprovalSecret: process.env.TOOL_APPROVAL_SECRET,
   });
 
+  // The UI message stream is composed manually so a cheap follow-up pass can
+  // run after the answer completes (public guest mode only): 3 short
+  // suggested questions emitted as a data part the widget renders as chips.
   const response = createUIMessageStreamResponse({
-    stream: toUIMessageStream({
-      stream: result.stream,
+    stream: createUIMessageStream({
       onError: (error) => {
         // Surface the real provider error to the client UI and server log
         // instead of the generic "An error occurred."
         console.error("[chat] streaming error:", error);
         return error instanceof Error ? error.message : String(error);
+      },
+      execute: async ({ writer }) => {
+        writer.merge(toUIMessageStream({ stream: result.stream }));
+
+        if (IS_PUBLIC) {
+          try {
+            const lastUserText = extractLastUserText(messages);
+            const answerText = await result.text;
+            const { text: raw } = await generateText({
+              model: groqModel(),
+              system:
+                'Propose exactly 3 short follow-up questions the visitor would naturally ask next, based on the assistant\'s last reply. Max 8 words each, in the SAME language as the reply. Match the reply\'s tone. Output ONLY a JSON array of 3 strings — no markdown fence, no preamble.',
+              prompt: `Assistant reply:\n${answerText.slice(0, 4000)}\n\nVisitor message:\n${lastUserText.slice(0, 1000)}`,
+            });
+            const match = raw.match(/\[[\s\S]*\]/);
+            const parsed: unknown = match ? JSON.parse(match[0]) : null;
+            const clean = Array.isArray(parsed)
+              ? parsed
+                  .filter((q): q is string => typeof q === "string")
+                  .map((q) => q.trim().slice(0, 120))
+                  .filter(Boolean)
+                  .slice(0, 3)
+              : [];
+            if (clean.length > 0) {
+              writer.write({ type: "data-followups", data: { items: clean } });
+            }
+          } catch {
+            // Follow-ups are garnish — never let them break the answer.
+          }
+        }
       },
     }),
   });
