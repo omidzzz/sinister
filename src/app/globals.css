@@ -132,3 +132,20 @@ body {
   box-shadow: 0 0 14px rgba(255, 32, 121, 0.55);
 }
 
+/* ── Light theme (syncs with the host site's theme engine) ────────── */
+/* `data-theme="light"` is set on <html> by the header toggle. Placed   */
+/* after the prefers-color-scheme block so it wins the cascade.        */
+
+[data-theme="light"] {
+  --background: #f6f2ff;
+  --foreground: #1b1030;
+}
+
+[data-theme="light"] .rave-panel {
+  background: rgba(250, 247, 255, 0.94);
+}
+
+[data-theme="light"] .rave-btn {
+  color: #26004a;
+}
+

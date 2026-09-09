@@ -5,7 +5,7 @@ import { GROQ_MODEL } from "@/lib/ai/provider";
  * GET http://localhost:3000/api/models -> { model: string, models: string[] }
  * Phase 4: local-only — returns 404 on the public deployment.
  */
-export async function GET(req: Request) {
+export async function GET() {
   if (process.env.AGENT_MODE === "public") {
     return Response.json({ error: "Not found." }, { status: 404 });
   }

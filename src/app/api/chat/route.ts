@@ -1,4 +1,4 @@
-﻿import {
+import {
   streamText,
   generateText,
   convertToModelMessages,
@@ -11,7 +11,11 @@
 import { groqModel } from "@/lib/ai/provider";
 import { SYSTEM_PROMPT, GUEST_SYSTEM_PROMPT } from "@/lib/ai/system-prompt";
 import { PORTFOLIO_KNOWLEDGE } from "@/lib/ai/portfolio";
-import { extractLastUserText, normalizeSessionId } from "@/lib/research/chat-store";
+import {
+  extractLastUserText,
+  normalizeSessionId,
+  logExchange,
+} from "@/lib/research/chat-store";
 import { agentTools } from "@/lib/agent/tools";
 import { agentWriteTools } from "@/lib/agent/write-tools";
 import {
@@ -19,6 +23,7 @@ import {
   isCommandAllowed,
   commandDenialReason,
 } from "@/lib/agent/terminal";
+import { checkRateLimit, extractClientIp } from "@/lib/rate-limit";
 
 export const maxDuration = 300;
 
@@ -30,6 +35,16 @@ const CHARS_PER_TOKEN = 4;
  * Keep the non-summarized part of every request comfortably below it.
  */
 const REQUEST_TOKEN_CAP = 5_500;
+const RATE_LIMIT_ENABLED = Number(process.env.RATE_LIMIT_MAX_REQUESTS ?? 0) > 0;
+async function summarizeMessages(messages: ModelMessage[]): Promise<string> {
+  const { text } = await generateText({
+    model: groqModel(),
+    system:
+      "Summarize this coding-agent conversation segment concisely. Preserve: the user's goals, file paths touched, decisions made, current plan state, and any pending tasks. Output only the summary.",
+    messages,
+  });
+  return text;
+}
 
 function estimateTokens(messages: ModelMessage[]): number {
   return Math.ceil(
@@ -62,19 +77,14 @@ async function applyTokenBudget(
     `[budget] ~${estimateTokens(all)} tokens exceeds budget ${TOKEN_BUDGET} - summarizing ${older.length} older messages`,
   );
 
-  // The summarizer call must also fit under the TPM cap — keep the most
+  // The summarizer call must also fit under the TPM cap � keep the most
   // recent of the older messages and drop the rest.
   let summaryInput = older;
   while (summaryInput.length > 1 && estimateTokens(summaryInput) > REQUEST_TOKEN_CAP) {
     summaryInput = summaryInput.slice(1);
   }
 
-  const { text: summary } = await generateText({
-    model: groqModel(),
-    system:
-      "Summarize this coding-agent conversation segment concisely. Preserve: the user's goals, file paths touched, decisions made, current plan state, and any pending tasks. Output only the summary.",
-    messages: summaryInput,
-  });
+  const summary = older.length > 0 ? await summarizeMessages(summaryInput) : undefined;
 
   return { messages: recent, summary };
 }
@@ -100,7 +110,7 @@ function sanitizeForGroq(messages: ModelMessage[]): ModelMessage[] {
   });
 }
 
-/** ── Phase 4: split deployment ──────────────────────────────────────────── */
+/** -- Phase 4: split deployment -------------------------------------------- */
 
 /** "public" (Vercel guest deployment) vs local full-agent mode. */
 const IS_PUBLIC = process.env.AGENT_MODE === "public";
@@ -129,6 +139,26 @@ export async function OPTIONS() {
 }
 
 export async function POST(req: Request) {
+  const clientIp = extractClientIp(req);
+  if (RATE_LIMIT_ENABLED) {
+    const rate = checkRateLimit(clientIp);
+    if (!rate.allowed) {
+      return Response.json(
+        {
+          error: `Rate limit exceeded. Try again in ${Math.ceil(rate.retryAfterMs / 1000)}s.`,
+          retryAfterMs: rate.retryAfterMs,
+        },
+        {
+          status: 429,
+          headers: {
+            "Retry-After": String(Math.ceil(rate.retryAfterMs / 1000)),
+            ...CORS_HEADERS,
+          },
+        }
+      );
+    }
+  }
+
   if (!isAuthorized(req)) {
     return Response.json(
       { error: "Unauthorized. This agent requires the x-sinister-key header." },
@@ -145,14 +175,12 @@ export async function POST(req: Request) {
 
   const {
     messages,
-    context,
     sessionId,
     locale,
     path,
     screen,
   }: {
     messages: UIMessage[];
-    context?: unknown;
     sessionId?: unknown;
     locale?: unknown;
     path?: unknown;
@@ -162,7 +190,7 @@ export async function POST(req: Request) {
     await convertToModelMessages(messages),
   );
 
-  // ── Research logging (feature-flagged by RESEARCH_DATABASE_URL) ──
+  // -- Research logging (feature-flagged by RESEARCH_DATABASE_URL) --
   const startedAt = Date.now();
   const researchSessionId = normalizeSessionId(sessionId);
   const researchLocale = typeof locale === "string" ? locale : null;
@@ -177,15 +205,38 @@ export async function POST(req: Request) {
   const researchPath = typeof path === "string" ? path : null;
   const researchScreen = typeof screen === "string" ? screen : null;
 
-  // Optional live post index (JSON sent by the portfolio widget, fetched
-  // from the site's own feed at request time). Capped hard so a tampered
-  // client can't blow the token budget.
-  const liveContext =
-    typeof context === "string" && context.trim().length > 0
-      ? `\n\n— LIVE POST INDEX (fetched from the site's feed at request time; for anything in it, this SUPERSEDES the dossier's blog list) —\n${context.trim().slice(0, 4_000)}`
-      : "";
+  // Server-side live post index — fetched once per request so the guest
+  // persona always sees the current blog list without trusting client input.
+  let liveContext = "";
+  if (IS_PUBLIC) {
+    try {
+      const postsRes = await fetch(
+        new URL("/api/posts", process.env.VERCEL_URL
+          ? `https://${process.env.VERCEL_URL}`
+          : `http://localhost:${process.env.PORT ?? 3000}`
+        ).toString(),
+        { cache: "no-store", signal: req.signal }
+      );
+      if (postsRes.ok) {
+        const { posts, note } = await postsRes.json() as {
+          posts: Array<{ title: string; url?: string }>;
+          note?: string;
+        };
+        if (posts.length > 0) {
+          const rendered = posts
+            .map((p) => (p.url ? `- ${p.title} — ${p.url}` : `- ${p.title}`))
+            .join("\n");
+          liveContext = `\n\n⏺ LIVE POST INDEX (fetched server-side from the site's feed; for anything in it, this SUPERSEDES the dossier's blog list) ⏺\n${rendered}`;
+          if (note) liveContext += `\n(${note})`;
+        }
+      }
+    } catch {
+      // If the posts endpoint isn't reachable (e.g. monorepo without the
+      // portfolio source), fall back to the baked-in dossier.
+    }
+  }
 
-  // Public deployment: no tools — the persona + portfolio dossier carry the
+  // Public deployment: no tools � the persona + portfolio dossier carry the
   // whole answer. The summarizer note keeps its placement inside the prompt.
   const publicSystem = `${GUEST_SYSTEM_PROMPT}\n\n${PORTFOLIO_KNOWLEDGE}${liveContext}${summary ? `\n\nSummary of the earlier conversation:\n${summary}` : ""}`;
   const localSystem = summary
@@ -236,9 +287,40 @@ export async function POST(req: Request) {
     }),
   });
   // Allow cross-origin bridge requests from the deployed site to this local
-  // machine (Cloudflare Tunnel → localhost).
+  // machine (Cloudflare Tunnel ? localhost).
   for (const [key, value] of Object.entries(CORS_HEADERS)) {
     response.headers.set(key, value);
   }
+
+  // Fire-and-forget research logging — a no-op unless RESEARCH_DATABASE_URL
+  // is configured (logExchange exits early). Awaits the stream's final usage
+  // and text, so this resolves after the client has the full reply. It must
+  // never block or break the chat response.
+  void (async () => {
+    try {
+      const [usage, text] = await Promise.all([result.usage, result.text]);
+      await logExchange({
+        sessionId: researchSessionId,
+        mode: IS_PUBLIC ? "public" : "local",
+        locale: researchLocale,
+        userAgent: researchUserAgent,
+        country: researchCountry,
+        region: researchRegion,
+        city: researchCity,
+        referrer: researchReferrer,
+        acceptLanguage: researchAcceptLang,
+        screen: researchScreen,
+        path: researchPath,
+        userText: researchUserText,
+        assistantText: text?.length ? text : null,
+        inputTokens: typeof usage?.inputTokens === "number" ? usage.inputTokens : null,
+        outputTokens: typeof usage?.outputTokens === "number" ? usage.outputTokens : null,
+        latencyMs: Date.now() - startedAt,
+      });
+    } catch {
+      // Research logging must never surface to the user.
+    }
+  })();
+
   return response;
 }

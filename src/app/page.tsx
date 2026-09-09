@@ -5,13 +5,45 @@ import {
   DefaultChatTransport,
   lastAssistantMessageIsCompleteWithApprovalResponses,
 } from "ai";
-import { diffLines } from "diff";
 import { useEffect, useMemo, useRef, useState } from "react";
+import { diffLines } from "diff";
+import type { Change } from "diff";
 
 /** ── Phase 4: the local bridge ─────────────────────────────────────────── */
 
 type BridgeConfig = { url: string; key: string };
 const BRIDGE_STORAGE_KEY = "sinister-bridge";
+const SESSION_STORAGE_KEY = "sinister-session";
+
+/** Anonymous per-browser session id the research store anchors rows on. */
+function loadSessionId(): string {
+  if (typeof window === "undefined") return "";
+  try {
+    let id = localStorage.getItem(SESSION_STORAGE_KEY);
+    if (!id) {
+      id = crypto.randomUUID();
+      localStorage.setItem(SESSION_STORAGE_KEY, id);
+    }
+    return id;
+  } catch {
+    return "";
+  }
+}
+
+/**
+ * Lazy extra request body — the anonymous per-browser session anchor the
+ * research store logs rows on (feature-flagged by RESEARCH_DATABASE_URL).
+ * Declared as a `Resolvable` function so it's resolved at fetch time on the
+ * client; SSR never touches `navigator`/`window`.
+ */
+function sessionBody(): object {
+  return {
+    sessionId: loadSessionId(),
+    locale: navigator.language,
+    path: window.location.pathname,
+    screen: `${window.screen.width}x${window.screen.height}`,
+  };
+}
 
 function loadBridge(): BridgeConfig | null {
   if (typeof window === "undefined") return null;
@@ -99,25 +131,130 @@ function BridgeModal({
   );
 }
 
-/** Loose shape of a tool part in the UI message stream. */
-type LooseToolPart = {
-  type: string; // "tool-<name>"
+/** Discriminated union of every tool-result part the UI may receive. */
+type ToolPartStateType =
+  | "input-streaming"
+  | "input-available"
+  | "output-available"
+  | "output-error"
+  | "approval-requested"
+  | "approval-responded";
+
+type ApprovalInfo = {
+  id: string;
+  isAutomatic?: boolean;
+  requestReason?: string;
+};
+
+/** Base fields shared by every tool-result part. */
+interface BaseToolPart {
+  type: string;
   toolCallId: string;
-  state:
-    | "input-streaming"
-    | "input-available"
-    | "output-available"
-    | "output-error"
-    | "approval-requested"
-    | "approval-responded";
+  state: ToolPartStateType;
   input?: unknown;
   output?: unknown;
   errorText?: string;
-  approval?: {
-    id: string;
-    isAutomatic?: boolean;
-    requestReason?: string;
-  };
+  approval?: ApprovalInfo;
+  toolName?: string;
+  summary?: string;
+}
+
+/** Tool-result parts only (excludes `"text"` parts). */
+type ToolResultPart =
+  | (BaseToolPart & { type: "tool-write_file" })
+  | (BaseToolPart & { type: "tool-edit_file" })
+  | (BaseToolPart & { type: "tool-run_command" })
+  | (BaseToolPart & { type: "tool-get_directory_structure" })
+  | (BaseToolPart & { type: "tool-read_file" })
+  | (BaseToolPart & { type: "tool-search_code" })
+  | (BaseToolPart & { type: "tool-scratchpad" });
+
+/** Text parts in the UI message stream. */
+type TextPart = { type: "text"; text: string };
+
+const TOOL_PART_STATES: readonly ToolPartStateType[] = [
+  "input-streaming",
+  "input-available",
+  "output-available",
+  "output-error",
+  "approval-requested",
+  "approval-responded",
+];
+
+/** Narrows an unknown part to a text part. */
+function isTextPart(part: unknown): part is TextPart {
+  if (typeof part !== "object" || part === null) return false;
+  const p = part as Record<string, unknown>;
+  return p.type === "text" && typeof p.text === "string";
+}
+
+/**
+ * Type guard: narrows an unknown part to a tool-result part.
+ * Replaces the previous loose `as unknown as …` cast.
+ */
+function isToolResultPart(part: unknown): part is ToolResultPart {
+  if (typeof part !== "object" || part === null) return false;
+  const p = part as Record<string, unknown>;
+  if (typeof p.type !== "string") return false;
+  if (!p.type.startsWith("tool-")) return false;
+  return (
+    typeof p.toolCallId === "string" &&
+    typeof p.state === "string" &&
+    TOOL_PART_STATES.includes(p.state as ToolPartStateType)
+  );
+}
+
+/** Every message part the UI may receive (tool or text) — the render loop
+ * narrows with `isTextPart` / `isToolResultPart` above.
+ */
+export type ToolPart = ToolResultPart | TextPart;
+
+/**
+ * Narrow an unknown message part to a tool-result part or text part.
+ * Replaces the previous loose `as unknown as …` cast.
+ */
+export function isToolPart(part: unknown): part is ToolPart {
+  return isToolResultPart(part) || isTextPart(part);
+}
+
+type Mood = "neutral" | "hyperfixation" | "deadpan" | "competence" | "snark";
+
+/** Lightweight mood classifier for the assistant's persona volatility. */
+function detectMood(text: string): Mood {
+  const t = text.toLowerCase();
+  // The persona explicitly tags its own modes in the system prompt; honour
+  // those first when present.
+  if (/〔\s*hyperfixation\s*〕/i.test(t) || /〔\s*hyperfixation\s*〕/.test(text))
+    return "hyperfixation";
+  if (/〔\s*deadpan\s*〕/i.test(t)) return "deadpan";
+  if (/〔\s*snark\s*off\s*〕/i.test(t) || /〔\s*competence\s*〕/i.test(t))
+    return "competence";
+  if (/〔\s*snark\s*〕/i.test(t)) return "snark";
+
+  // Heuristic fallbacks based on punctuation/volume.
+  const allCaps = text.replace(/[^A-Z]/g, "").length;
+  const alphaCount = text.replace(/[^A-Za-z]/g, "").length;
+  const capsRatio = alphaCount > 0 ? allCaps / alphaCount : 0;
+
+  if (capsRatio > 0.35 && text.length > 40) return "hyperfixation";
+  if (/^(!?|…|\s*)$/.test(text.trim()) && text.length < 60) return "deadpan";
+  return "neutral";
+}
+
+const MOOD_LABEL: Record<Mood, string> = {
+  neutral: "",
+  hyperfixation: "〔HYPERFIXATION〕",
+  deadpan: "〔DEADPAN〕",
+  competence: "〔SNARK OFF〕",
+  snark: "〔SNARK〕",
+};
+
+const MOOD_CLASS: Record<Mood, string> = {
+  neutral: "",
+  hyperfixation: "text-cyan-300",
+  deadpan: "text-zinc-500",
+  competence: "text-lime-300",
+  snark: "text-fuchsia-300",
 };
 
 type WriteInput = {
@@ -140,14 +277,17 @@ function computeNewContent(input: WriteInput, oldContent: string): string {
 }
 
 function DiffView({ oldContent, newContent }: { oldContent: string; newContent: string }) {
-  const parts = diffLines(oldContent, newContent);
+  const parts: Change[] = diffLines(oldContent, newContent);
   return (
     <div className="max-h-72 overflow-y-auto rounded-lg border border-fuchsia-500/40 bg-black/70 font-mono text-[11px] leading-5">
-      {parts.map((part, i) =>
+      {parts.map((part: Change, i: number) =>
         part.value
           .split("\n")
-          .filter((l, j, arr) => !(l === "" && j === arr.length - 1))
-          .map((line, j) => (
+          .filter(
+            (l: string, j: number, arr: string[]) =>
+              !(l === "" && j === arr.length - 1),
+          )
+          .map((line: string, j: number) => (
             <div
               key={`${i}-${j}`}
               className={
@@ -169,15 +309,28 @@ function DiffView({ oldContent, newContent }: { oldContent: string; newContent: 
   );
 }
 
+function parseWriteInput(input: unknown): WriteInput {
+  if (typeof input !== "object" || input === null) return { path: "" };
+  const rec = input as Record<string, unknown>;
+  const parsed: WriteInput = {
+    path: typeof rec.path === "string" ? rec.path : "",
+  };
+  if (typeof rec.content === "string") parsed.content = rec.content;
+  if (typeof rec.find === "string") parsed.find = rec.find;
+  if (typeof rec.replace === "string") parsed.replace = rec.replace;
+  if (typeof rec.replaceAll === "boolean") parsed.replaceAll = rec.replaceAll;
+  return parsed;
+}
+
 /** The Phase-1 Approval Gate UI: diff preview + Approve / Deny. */
 function ApprovalBox({
   part,
   onRespond,
 }: {
-  part: LooseToolPart;
+  part: ToolResultPart;
   onRespond: (id: string, approved: boolean) => void;
 }) {
-  const input = (part.input ?? {}) as WriteInput;
+  const input = parseWriteInput(part.input);
   const [old, setOld] = useState<{
     loading: boolean;
     content: string | null;
@@ -251,11 +404,25 @@ const STATE_LABEL: Record<string, string> = {
   "approval-responded": "responded",
 };
 
+/** Quick-start prompts shown above the textarea on an empty conversation. */
+const PROMPT_CHIPS = [
+  "What can you actually do?",
+  "How does the local bridge work?",
+  "What makes the approval gate safe?",
+] as const;
+
+function readOutputCount(output: object): number | undefined {
+  const rec = output as Record<string, unknown>;
+  const matchCount = typeof rec.matchCount === "number" ? rec.matchCount : undefined;
+  const totalLines = typeof rec.totalLines === "number" ? rec.totalLines : undefined;
+  return matchCount ?? totalLines;
+}
+
 function ToolPartView({
   part,
   onRespond,
 }: {
-  part: LooseToolPart;
+  part: ToolResultPart;
   onRespond: (id: string, approved: boolean) => void;
 }) {
   const toolName = part.type.replace(/^tool-/, "");
@@ -279,8 +446,7 @@ function ToolPartView({
     part.state === "output-available" &&
     typeof part.output === "object" &&
     part.output !== null
-      ? (part.output as { matchCount?: number; totalLines?: number }).matchCount ??
-        (part.output as { totalLines?: number }).totalLines
+      ? readOutputCount(part.output)
       : undefined;
 
   return (
@@ -324,13 +490,43 @@ function ToolPartView({
 
 export default function Chat() {
   const [input, setInput] = useState("");
-  const [bridge, setBridge] = useState<BridgeConfig | null>(null);
+  const [theme, setTheme] = useState<"dark" | "light">("dark");
+  const [aboutOpen, setAboutOpen] = useState(false);
+  // Reads localStorage lazily so SSR renders `null` and hydration matches —
+  // no post-mount setState-in-effect needed.
+  const [bridge, setBridge] = useState<BridgeConfig | null>(loadBridge);
   const [bridgeOpen, setBridgeOpen] = useState(false);
+  // `bridgeAlive` is null until the first heartbeat completes. It is read by
+  // the header badge below.
+  const [bridgeAlive, setBridgeAlive] = useState<boolean | null>(null);
 
-  // Load saved bridge config after mount (avoids SSR/hydration issues).
+  // Heartbeat: while a bridge is configured, ping its /api/health every 30s
+  // so a dead tunnel (restarted laptop, rotated URL) surfaces instead of
+  // failing silently on the next chat message.
   useEffect(() => {
-    setBridge(loadBridge());
-  }, []);
+    if (!bridge?.url) return;
+    let cancelled = false;
+    const base = bridge.url.replace(/\/+$/, "");
+    const ping = async () => {
+      try {
+        const res = await fetch(`${base}/api/health`, {
+          cache: "no-store",
+          signal: AbortSignal.timeout(8000),
+        });
+        if (!cancelled) setBridgeAlive(res.ok);
+      } catch {
+        if (!cancelled) setBridgeAlive(false);
+      }
+    };
+    // Warm-start liveness so the header badge isn't stale after a URL change;
+    // the interval below re-verifies every 30s.
+    void ping();
+    const id = setInterval(() => void ping(), 30_000);
+    return () => {
+      cancelled = true;
+      clearInterval(id);
+    };
+  }, [bridge?.url]);
 
   // Hidden toggle: Ctrl+Shift+E (or Cmd+Shift+E) opens the bridge dialog.
   useEffect(() => {
@@ -349,6 +545,7 @@ export default function Chat() {
   }, []);
 
   const saveBridge = (config: BridgeConfig | null) => {
+    setBridgeAlive(null); // reset liveness; the heartbeat effect re-verifies
     setBridge(config);
     if (config) {
       localStorage.setItem(BRIDGE_STORAGE_KEY, JSON.stringify(config));
@@ -357,13 +554,25 @@ export default function Chat() {
     }
   };
 
-  // When bridged, chat requests go to the local machine through the tunnel.
+  // Manual dark/light toggle — the widget defaults to dark (rave) and a
+  // `data-theme="light"` ancestor flips the CSS variables in globals.css so
+  // the widget can sync with the host portfolio site's theme engine.
+  useEffect(() => {
+    document.documentElement.dataset.theme = theme;
+  }, [theme]);
+
+  // When bridged, chat requests go to the local machine through the tunnel;
+  // otherwise they hit the same-origin /api/chat. The session anchor rides on
+  // the transport-level `body` (resolved per request, client-side).
   const transport = useMemo(() => {
-    if (!bridge?.url) return undefined;
-    return new DefaultChatTransport({
-      api: `${bridge.url.replace(/\/+$/, "")}/api/chat`,
-      headers: bridge.key ? { "x-sinister-key": bridge.key } : undefined,
-    });
+    if (bridge?.url) {
+      return new DefaultChatTransport({
+        api: `${bridge.url.replace(/\/+$/, "")}/api/chat`,
+        headers: bridge.key ? { "x-sinister-key": bridge.key } : undefined,
+        body: sessionBody,
+      });
+    }
+    return new DefaultChatTransport({ api: "/api/chat", body: sessionBody });
   }, [bridge]);
 
   const {
@@ -397,27 +606,72 @@ export default function Chat() {
 
       <div className="flex h-dvh flex-col">
         <header className="rave-panel border-b border-fuchsia-500/30 px-4 py-3 backdrop-blur">
-          <h1 className="rave-text rave-title font-mono text-lg font-extrabold tracking-widest">
-            SINISTER
-            <span className="ml-3 text-xs font-normal tracking-normal text-cyan-300/70">
-              local-first coding agent
-            </span>
-            {bridge && (
-              <span className="rave-btn ml-3 rounded-md px-2 py-0.5 align-middle font-mono text-[10px] font-bold">
-                ⚡ LOCAL BRIDGE
+          <div className="mx-auto flex w-full max-w-3xl items-center justify-between gap-3">
+            <h1 className="rave-text rave-title font-mono text-lg font-extrabold tracking-widest">
+              SINISTER
+              <span className="ml-3 text-xs font-normal tracking-normal text-cyan-300/70">
+                local-first coding agent
               </span>
-            )}
-          </h1>
+              {bridge && (
+                <span className="rave-btn ml-3 rounded-md px-2 py-0.5 align-middle font-mono text-[10px] font-bold">
+                  ⚡ LOCAL BRIDGE
+                  {bridgeAlive === true
+                    ? " · ONLINE"
+                    : bridgeAlive === false
+                      ? " · OFFLINE"
+                      : ""}
+                </span>
+              )}
+            </h1>
+            <div className="flex shrink-0 items-center gap-2">
+              <button
+                type="button"
+                title="Toggle dark / light"
+                aria-label="Toggle dark / light theme"
+                className="rounded-lg border border-cyan-400/40 bg-black/60 px-2.5 py-1 font-mono text-xs text-cyan-200 transition hover:border-cyan-300"
+                onClick={() => setTheme((t) => (t === "dark" ? "light" : "dark"))}
+              >
+                {theme === "dark" ? "☾" : "☀"}
+              </button>
+              <button
+                type="button"
+                title="About SINISTER"
+                aria-label="About SINISTER"
+                aria-expanded={aboutOpen}
+                className="rounded-lg border border-fuchsia-500/40 bg-black/60 px-2.5 py-1 font-mono text-xs text-fuchsia-200 transition hover:border-fuchsia-400"
+                onClick={() => setAboutOpen((o) => !o)}
+              >
+                ⓘ
+              </button>
+            </div>
+          </div>
         </header>
 
         <div className="flex-1 overflow-y-auto px-4 py-6">
           <div className="mx-auto flex w-full max-w-3xl flex-col gap-4">
             {messages.length === 0 && (
-              <p className="rave-text mt-16 text-center font-mono text-sm">
-                ✦ welcome to the trip ✦ ask anything about your project —
-                non-trivial tasks get a plan first, and every write needs your
-                approval before it lands ✦
-              </p>
+              <>
+                <p className="rave-text mt-16 text-center font-mono text-sm">
+                  ✦ welcome to the trip ✦ ask anything about your project —
+                  non-trivial tasks get a plan first, and every write needs your
+                  approval before it lands ✦
+                </p>
+                <div className="mt-6 flex flex-wrap justify-center gap-2">
+                  {PROMPT_CHIPS.map((chip) => (
+                    <button
+                      key={chip}
+                      type="button"
+                      className="rounded-full border border-fuchsia-500/40 bg-black/60 px-3.5 py-1.5 font-mono text-[11px] text-fuchsia-200 transition hover:border-fuchsia-400 hover:bg-black/80"
+                      onClick={() => {
+                        if (isStreaming) return;
+                        sendMessage({ text: chip });
+                      }}
+                    >
+                      {chip}
+                    </button>
+                  ))}
+                </div>
+              </>
             )}
 
             {messages.map((message) => (
@@ -426,36 +680,51 @@ export default function Chat() {
                 className={
                   message.role === "user"
                     ? "rave-border ml-auto max-w-[85%] rounded-2xl rounded-br-md p-[1.5px]"
-                    : "max-w-[85%] rounded-2xl rounded-bl-md border border-cyan-400/40 bg-black/70 text-sm shadow-[0_0_12px_rgba(0,229,255,0.15)]"
+                    : theme === "light"
+                      ? "max-w-[85%] rounded-2xl rounded-bl-md border border-fuchsia-500/40 bg-white/90 text-sm shadow-[0_0_12px_rgba(255,0,234,0.12)]"
+                      : "max-w-[85%] rounded-2xl rounded-bl-md border border-cyan-400/40 bg-black/70 text-sm shadow-[0_0_12px_rgba(0,229,255,0.15)]"
                 }
               >
                 {message.role === "user" ? (
                   <div className="rave-panel whitespace-pre-wrap rounded-[calc(1rem-1px)] px-4 py-2.5 text-sm text-fuchsia-200">
                     {message.parts
-                      .filter((p) => p.type === "text")
-                      .map((p) => (p as { text: string }).text)
+                      .filter(isTextPart)
+                      .map((p) => p.text)
                       .join("")}
                   </div>
                 ) : (
-                  <div className="flex flex-col gap-2 whitespace-pre-wrap px-4 py-2.5 text-zinc-100">
+                  <div
+                    className={`flex flex-col gap-2 whitespace-pre-wrap px-4 py-2.5 ${
+                      theme === "light" ? "text-zinc-900" : "text-zinc-100"
+                    }`}
+                  >
                     {message.parts.map((part, i) => {
-                      if (part.type.startsWith("tool-")) {
+                      if (isTextPart(part)) {
+                        const mood = detectMood(part.text);
+                        const label = MOOD_LABEL[mood];
+                        return (
+                          <div key={`${message.id}-${i}`}>
+                            {label && (
+                              <span
+                                className={`font-mono text-[10px] tracking-widest mb-1 block ${MOOD_CLASS[mood]}`}
+                              >
+                                {label}
+                              </span>
+                            )}
+                            {part.text}
+                          </div>
+                        );
+                      }
+                      if (isToolResultPart(part)) {
                         return (
                           <ToolPartView
                             key={`${message.id}-${i}`}
-                            part={part as unknown as LooseToolPart}
+                            part={part}
                             onRespond={respondToApproval}
                           />
                         );
                       }
-                      switch (part.type) {
-                        case "text":
-                          return (
-                            <div key={`${message.id}-${i}`}>{part.text}</div>
-                          );
-                        default:
-                          return null;
-                      }
+                      return null;
                     })}
                   </div>
                 )}
@@ -488,7 +757,11 @@ export default function Chat() {
             }}
           >
             <textarea
-              className="max-h-40 min-h-[44px] flex-1 resize-none rounded-xl border border-fuchsia-500/50 bg-black/80 px-3.5 py-2.5 font-mono text-sm text-lime-200 outline-none placeholder:text-zinc-600 focus:border-cyan-300/70"
+              className={`max-h-40 min-h-[44px] flex-1 resize-none rounded-xl border border-fuchsia-500/50 px-3.5 py-2.5 font-mono text-sm outline-none focus:border-cyan-300/70 ${
+                theme === "light"
+                  ? "bg-white/90 text-zinc-900 placeholder:text-zinc-400"
+                  : "bg-black/80 text-lime-200 placeholder:text-zinc-600"
+              }`}
               rows={1}
               value={input}
               placeholder={
@@ -520,6 +793,50 @@ export default function Chat() {
           </form>
         </footer>
       </div>
+
+      {/* About drawer: explains guest vs bridged mode + privacy posture. */}
+      {aboutOpen && (
+        <div
+          className="fixed inset-0 z-40 flex items-end justify-center bg-black/50 backdrop-blur-sm sm:items-center"
+          onClick={() => setAboutOpen(false)}
+        >
+          <div
+            className="rave-border w-[min(92vw,26rem)] rounded-2xl p-[1.5px]"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="rave-panel rounded-[calc(1rem-1px)] p-5">
+              <h2 className="rave-text font-mono text-sm font-bold tracking-widest">
+                WHO IS SINISTER?
+              </h2>
+              <p className="mt-3 text-xs leading-relaxed text-zinc-300">
+                SINISTER is a snarky, local-first AI coding agent. Right now it
+                runs in <strong>guest mode</strong>: it can chat and answer
+                questions about this site and its work, but it has{" "}
+                <strong>no tool access</strong> — it cannot read your files or
+                run anything.
+              </p>
+              <p className="mt-2 text-xs leading-relaxed text-zinc-400">
+                Connect your own machine via the local bridge (Ctrl+Shift+E)
+                and it gains a sandboxed toolbelt: read-only filesystem tools,
+                an allowlisted terminal, and a write gate where every file
+                change needs your explicit approval before it lands.
+              </p>
+              <p className="mt-2 text-xs leading-relaxed text-zinc-500">
+                Privacy: messages are processed by the Groq API to generate
+                replies; nothing is stored unless the operator enables the
+                research database.
+              </p>
+              <button
+                type="button"
+                className="rave-btn mt-4 rounded-lg px-4 py-1.5 text-xs font-bold uppercase tracking-wider transition-transform"
+                onClick={() => setAboutOpen(false)}
+              >
+                Got it
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {bridgeOpen && (
         <BridgeModal current={bridge} onSave={saveBridge} onClose={() => setBridgeOpen(false)} />

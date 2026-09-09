@@ -16,10 +16,10 @@ const MAX_OUTPUT_CHARS = 4000;
  */
 const ALLOWED_COMMAND_PATTERNS: RegExp[] = [
   /^npm (run|test) [a-z0-9:@/._-]+$/i,
-  /^npm (run )?(build|lint)$/,
+  /^npm (run )?(build|lint|type-check)$/,
   /^npm test$/,
-  /^git (status|diff|log|show|branch|remote -v|rev-parse)( .*)?$/i,
-  /^npx (eslint|tsc)( .*)?$/i,
+  /^git (status|diff|log|show|branch|remote -v|rev-parse|stash list)( .*)?$/i,
+  /^npx (eslint|tsc|prettier --check)( .*)?$/i,
   /^node --version$/i,
   /^npm --version$/i,
 ];
@@ -36,8 +36,8 @@ export function isCommandAllowed(command: string): boolean {
 export function commandDenialReason(command: string): string {
   return [
     `Command "${command}" is not on the allowlist, so it was not executed.`,
-    "Allowed (auto-runs): `npm run <script>`, `npm test`, `npm run lint`,",
-    "`git status|diff|log|show|branch|remote -v|rev-parse`, `npx eslint`, `npx tsc`.",
+    "Allowed (auto-runs): `npm run <script>`, `npm run type-check`, `npm test`, `npm run lint`,",
+    "`git status|diff|log|show|branch|remote -v|rev-parse|stash list`, `npx eslint`, `npx tsc`, `npx prettier --check`.",
     "Installs, servers (dev/start), file deletion, and anything with shell",
     "operators (; | & > < $ backtick) are permanently blocked.",
   ].join(" ");
@@ -59,7 +59,7 @@ function truncate(output: string): string {
 export const terminalTool = {
   run_command: tool({
     description:
-      "Run a shell command in the project root. Only allowlisted non-destructive commands execute (npm run <script>, npm test, npm run lint, read-only git commands like status/diff/log/show/branch, npx eslint, npx tsc). Everything else is automatically denied. Use this to verify builds, run linters, and inspect git history.",
+      "Run a shell command in the project root. Only allowlisted non-destructive commands execute (npm run <script>, npm test, npm run lint, npm run type-check, read-only git commands like status/diff/log/show/branch/stash list, npx eslint, npx tsc, npx prettier --check). Everything else is automatically denied. Use this to verify builds, run linters, and inspect git history.",
     inputSchema: z.object({
       command: z
         .string()
