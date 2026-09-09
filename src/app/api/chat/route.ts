@@ -10,6 +10,10 @@ import {
 } from "ai";
 import { groqModel } from "@/lib/ai/provider";
 import { SYSTEM_PROMPT, GUEST_SYSTEM_PROMPT } from "@/lib/ai/system-prompt";
+import {
+  GUEST_LOCALE_DIRECTIVES,
+  GUEST_UNHIGNED_ADDENDUM,
+} from "@/lib/ai/system-prompt";
 import { PORTFOLIO_KNOWLEDGE } from "@/lib/ai/portfolio";
 import {
   extractLastUserText,
@@ -177,12 +181,14 @@ export async function POST(req: Request) {
     messages,
     sessionId,
     locale,
+    persona,
     path,
     screen,
   }: {
     messages: UIMessage[];
     sessionId?: unknown;
     locale?: unknown;
+    persona?: unknown;
     path?: unknown;
     screen?: unknown;
   } = await req.json();
@@ -238,7 +244,15 @@ export async function POST(req: Request) {
 
   // Public deployment: no tools � the persona + portfolio dossier carry the
   // whole answer. The summarizer note keeps its placement inside the prompt.
-  const publicSystem = `${GUEST_SYSTEM_PROMPT}\n\n${PORTFOLIO_KNOWLEDGE}${liveContext}${summary ? `\n\nSummary of the earlier conversation:\n${summary}` : ""}`;
+  // Locale pins the default reply language; "unhinged" (unlocked via the
+  // portfolio's terminal easter egg) appends the max-volatility addendum.
+  const guestDirectives = [
+    typeof locale === "string" ? GUEST_LOCALE_DIRECTIVES[locale] : undefined,
+    persona === "unhinged" ? GUEST_UNHIGNED_ADDENDUM : undefined,
+  ]
+    .filter(Boolean)
+    .join("\n\n");
+  const publicSystem = `${GUEST_SYSTEM_PROMPT}${guestDirectives ? `\n\n${guestDirectives}` : ""}\n\n${PORTFOLIO_KNOWLEDGE}${liveContext}${summary ? `\n\nSummary of the earlier conversation:\n${summary}` : ""}`;
   const localSystem = summary
     ? `${SYSTEM_PROMPT}\n\nSummary of the earlier conversation (older messages were trimmed to stay under the token budget):\n${summary}`
     : SYSTEM_PROMPT;
