@@ -317,6 +317,7 @@ export async function POST(req: Request) {
           try {
             const lastUserText = extractLastUserText(messages);
             const answerText = await result.text;
+            if (!answerText || answerText.trim().length < 20) return;
             const { text: raw } = await generateText({
               model: groqModel(),
               system:
