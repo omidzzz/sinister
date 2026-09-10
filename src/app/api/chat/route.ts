@@ -187,6 +187,7 @@ export async function POST(req: Request) {
     profile,
     path,
     screen,
+    context,
   }: {
     messages: UIMessage[];
     sessionId?: unknown;
@@ -195,6 +196,7 @@ export async function POST(req: Request) {
     profile?: unknown;
     path?: unknown;
     screen?: unknown;
+    context?: unknown;
   } = await req.json();
   const { messages: budgetedMessages, summary } = await applyTokenBudget(
     await convertToModelMessages(messages),
@@ -215,10 +217,27 @@ export async function POST(req: Request) {
   const researchPath = typeof path === "string" ? path : null;
   const researchScreen = typeof screen === "string" ? screen : null;
 
-  // Server-side live post index — fetched once per request so the guest
-  // persona always sees the current blog list without trusting client input.
+  // Live post index — the client's `context` (built from the portfolio's real
+  // feed/DB on the site itself) is the freshest source of truth: it carries
+  // every published post — currently ~23 — which the build-time dossier can't
+  // know about. Sanitize it heavily (dash-list lines only, capped) so a
+  // tampered request can't inject prompt text, then fall back to the
+  // server-side /api/posts fetch when the client sent nothing.
   let liveContext = "";
-  if (IS_PUBLIC) {
+  const clientContext =
+    typeof context === "string" && context.trim()
+      ? context
+          .split("\n")
+          .map((l) => l.replace(/\r/g, ""))
+          .filter((l) => l.startsWith("- ") || l.startsWith("⏺"))
+          .slice(0, 80)
+          .join("\n")
+          .trim()
+          .slice(0, 8000)
+      : "";
+  if (clientContext) {
+    liveContext = `\n\n⏺ LIVE POST INDEX (fetched from the site's live feed at request time; for anything in it, this SUPERSEDES the dossier's blog list) ⏺\n${clientContext}`;
+  } else if (IS_PUBLIC) {
     try {
       const postsRes = await fetch(
         new URL("/api/posts", process.env.VERCEL_URL

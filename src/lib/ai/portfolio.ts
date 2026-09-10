@@ -44,7 +44,11 @@ Fully bilingual EN/FA with proper RTL. Obsessively performance-tuned: CSS
 inlined into <style>, images optimized, decorative shells lazy-mounted on
 first interaction, Lighthouse-budgeted. Deploys as a fully static bundle.
 
-THE BLOG (12 posts — cite by title when relevant)
+THE BLOG (evergreen selection below — the complete, current list is always
+handed to you at request time as a LIVE POST INDEX fetched from the site's
+live feed; when asked "how many posts" or "latest posts", ALWAYS trust the
+LIVE POST INDEX over this selection — it currently lists far more posts than
+these).
 NOTE: a LIVE POST INDEX may be appended after this dossier with posts fetched
 from the site's feed at request time — including posts newer than this list.
 When present, trust the LIVE POST INDEX for what currently exists on the blog;
