@@ -33,15 +33,29 @@ import { checkRateLimit, extractClientIp } from "@/lib/rate-limit";
 
 export const maxDuration = 300;
 
-/** Phase 5 "Token Budgeting": force a summary when history gets too big. */
-const TOKEN_BUDGET = Number(process.env.TOKEN_BUDGET ?? 6_000);
-const CHARS_PER_TOKEN = 4;
 /**
- * Groq's free tier enforces an 8,000 tokens-per-minute limit on this model.
- * Keep the non-summarized part of every request comfortably below it.
+ * Phase 5 "Token Budgeting" is OPT-IN. Both knobs default to 0 = NO LIMIT:
+ * the whole conversation rides to the model untouched — no summarizer call,
+ * no trimming. Set them in the environment to bring the guardrails back:
+ *
+ *   TOKEN_BUDGET=6000        summarize older history once a thread passes
+ *                            ~6k estimated tokens
+ *   REQUEST_TOKEN_CAP=5500   hard per-request ceiling, e.g. to stay under a
+ *                            provider TPM cap (Groq's free tier on this
+ *                            model is 8,000 tokens/minute)
+ *
+ * With both set, the tightest number is the per-request ceiling. A missing,
+ * non-numeric or <= 0 value counts as "off".
  */
-const REQUEST_TOKEN_CAP = 5_500;
+const TOKEN_BUDGET = Number(process.env.TOKEN_BUDGET ?? 0);
+const CHARS_PER_TOKEN = 4;
+const REQUEST_TOKEN_CAP = Number(process.env.REQUEST_TOKEN_CAP ?? 0);
 const RATE_LIMIT_ENABLED = Number(process.env.RATE_LIMIT_MAX_REQUESTS ?? 0) > 0;
+
+/** Per-request token ceiling — Infinity when no limit is configured. */
+const REQUEST_CEILING = [TOKEN_BUDGET, REQUEST_TOKEN_CAP]
+  .filter((n) => Number.isFinite(n) && n > 0)
+  .reduce((min, n) => Math.min(min, n), Number.POSITIVE_INFINITY);
 async function summarizeMessages(messages: ModelMessage[]): Promise<string> {
   const { text } = await generateText({
     model: groqModel(),
@@ -64,19 +78,30 @@ async function applyTokenBudget(
 ): Promise<{ messages: ModelMessage[]; summary?: string }> {
   const all = sanitizeForGroq(messages);
 
-  // Take messages from the end until the request fits under the TPM cap.
+  // No limit configured (the default): hand over the full conversation.
+  if (!Number.isFinite(REQUEST_CEILING)) {
+    return { messages: all };
+  }
+
+  // Take messages from the end until the request fits under the ceiling.
   const recent: ModelMessage[] = [];
   let total = 0;
   for (let i = all.length - 1; i >= 0; i--) {
     const cost = estimateTokens([all[i]]);
-    if (recent.length > 0 && total + cost > REQUEST_TOKEN_CAP) break;
+    if (recent.length > 0 && total + cost > REQUEST_CEILING) break;
     recent.unshift(all[i]);
     total += cost;
   }
   const older = all.slice(0, all.length - recent.length);
 
-  if (estimateTokens(all) <= TOKEN_BUDGET || older.length === 0) {
-    return { messages: all };
+  // Summarize only when a TOKEN_BUDGET was set and history actually overflows
+  // it; a bare ceiling just trims. Either way, never drop everything.
+  if (
+    TOKEN_BUDGET <= 0 ||
+    older.length === 0 ||
+    estimateTokens(all) <= TOKEN_BUDGET
+  ) {
+    return { messages: recent.length > 0 ? recent : all };
   }
 
   console.log(
@@ -86,7 +111,7 @@ async function applyTokenBudget(
   // The summarizer call must also fit under the TPM cap � keep the most
   // recent of the older messages and drop the rest.
   let summaryInput = older;
-  while (summaryInput.length > 1 && estimateTokens(summaryInput) > REQUEST_TOKEN_CAP) {
+  while (summaryInput.length > 1 && estimateTokens(summaryInput) > REQUEST_CEILING) {
     summaryInput = summaryInput.slice(1);
   }
 

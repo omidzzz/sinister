@@ -13,7 +13,8 @@ and Groq's free tier.
 - Allowlisted terminal executor (`npm run build`, `git diff`, `npx eslint`...)
 - Git auto-commit after every applied edit (`AI: edit <path>`)
 - `.ai_context` scratchpad for long multi-step tasks
-- Token budgeting: older history is auto-summarized to respect Groq's TPM limits
+- Token budgeting (opt-in): set `TOKEN_BUDGET` / `REQUEST_TOKEN_CAP` to
+  summarize or trim long threads; unset = the agent keeps all of it
 
 ## Local development
 
